@@ -1,0 +1,14 @@
+## Title: DXM Network |cff774422(Shared Market Data)
+## IconTexture: Interface\Icons\INV_Letter_05
+## Notes: Exchanges anonymous market observations with DXM Relay and trusted peers.
+## Interface: 16001
+## Dependencies: DXM
+## SavedVariables: DXMSharedExport, DXMSharedImport, DXMSharedConfig
+## Version: 0.13.17
+## Author: DefylerZR1
+
+RelaySnapshot.lua
+Main.lua
+Peer.lua
+
+

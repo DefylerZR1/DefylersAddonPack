@@ -1,0 +1,18 @@
+package-as: DXM
+enable-nolib-creation: no
+move-folders:
+    DXM/DXM_DDQ: DXM_DDQ
+    DXM/DXM_DealFinder: DXM_DealFinder
+    DXM/DXM_Loader: DXM_Loader
+    DXM/DXM_SharedData: DXM_SharedData
+    DXM/DXM_Stats_OverTime: DXM_Stats_OverTime
+    DXM/DXM_Valuer: DXM_Valuer
+    DXM/DefylerDamageMeter: DefylerDamageMeter
+    DXM/DefylerUI: DefylerUI
+    DXM/ForeverCoreFixes: ForeverCoreFixes
+    DXM/ForeverSettings: ForeverSettings
+    DXM/Nemesis: Nemesis
+ignore:
+    - README.md
+    - RELEASE-SOURCE.json
+    - .gitignore

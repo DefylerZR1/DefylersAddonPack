@@ -1,0 +1,15 @@
+## Title: LibExtraTip |cff224477(lib)
+## Notes: Assists in the management of additional tooltip information.
+##
+## Interface: 100206
+## LoadOnDemand: 0
+##
+## Version: <%version%> (<%codename%>)
+## Revision: $Id$
+## Author: DefylerZR1
+## X-Part-Of: Libraries
+## X-Category: Library
+## X-URL: https://defyler.dev/
+## X-Feedback: https://defyler.dev/
+##
+Load.xml

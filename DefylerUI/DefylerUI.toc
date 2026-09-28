@@ -1,0 +1,15 @@
+## Interface: 16001
+## Title: Defyler UI
+## IconTexture: Interface\Icons\INV_Misc_Gear_01
+## Notes: DUI controls for moving, resizing, and managing major interface windows.
+## Author: DefylerZR1
+## Version: 0.4.13
+## SavedVariables: DefylerUIDB, DefylerSuiteDB
+
+GlobalScale.lua
+SuitePanel.lua
+Core.lua
+SuitePersistence.lua
+OneBag.lua
+
+InventoryValue.lua

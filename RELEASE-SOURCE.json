@@ -1,0 +1,28 @@
+{
+  "release": "v1.0.0",
+  "releaseChannel": "Release",
+  "maturityNotice": "First public release; issues may still be present",
+  "target": "CurseForge World of Warcraft addon processor",
+  "sourceArchive": "Defyler-Alpha-1.0.0.zip",
+  "sourceSha256": "ffb936794db5016d496e572efc4f49cf043c117747b312576af9cdd7668532c0",
+  "archive": "Defyler-Addon-Pack-v1.0.0.zip",
+  "bytes": 6967970,
+  "files": 186,
+  "sha256": "ec2011dfa75ecab589c1cde483a9286a7c78ba6c2460de818ed51e389b9322a3",
+  "addons": {
+    "DXM": "0.14.19",
+    "DXM_DDQ": "0.1.11",
+    "DXM_DealFinder": "0.13.17",
+    "DXM_Loader": "0.13.17",
+    "DXM_SharedData": "0.13.17",
+    "DXM_Stats_OverTime": "0.13.17",
+    "DXM_Valuer": "0.13.17",
+    "DefylerUI": "0.4.13",
+    "DefylerDamageMeter": "0.4.13",
+    "ForeverSettings": "0.1.6",
+    "ForeverCoreFixes": "0.1.4",
+    "Nemesis": "0.3.25"
+  },
+  "companionAppsIncluded": false,
+  "derivedOnlyFromReleasedAddOnsPayload": true
+}

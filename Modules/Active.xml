@@ -1,0 +1,14 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+	<Include file="Scanner\Embed.xml"/>
+	<Include file="Tooltip\Embed.xml"/>
+	<Include file="Mailbox\Embed.xml"/>
+	<Include file="Exchange\Embed.xml"/>
+	<Include file="Ledger\Embed.xml"/>
+	<Include file="Earnings\Embed.xml"/>
+	<Include file="VendorFinder\Embed.xml"/>
+	<Include file="DisenchantTracker\Embed.xml"/>
+	<Include file="MarketTools\Embed.xml"/>
+	<Include file="Config\Embed.xml"/>
+	<Include file="ProfessionProfit\Embed.xml"/>
+    <Include file="MerchantBuyList\Embed.xml"/>
+</Ui>

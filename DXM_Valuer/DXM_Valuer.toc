@@ -1,0 +1,23 @@
+## Title: DXM: |cff447722Valuer
+## IconTexture: Interface\Icons\INV_Misc_Coin_02
+## Notes: Shows DXM market values while listing items.
+##
+## Interface: 16001
+## LoadOnDemand: 0
+## Dependencies: DXM_Loader, DXM
+## OptionalDependencies: !nLog, SlideBar, Configator, Babylonian, DebugLib, TipHelper, LibExtraTip, LibDataBroker
+## SavedVariables: DXMValuationData
+##
+## Version: 0.13.17
+## Revision: $Id$
+## Author: DefylerZR1
+## X-Part-Of: DXM
+## X-Category: Auction House
+## X-Max-Interface: 110000
+## X-URL: https://defyler.dev/
+## X-Feedback: https://defyler.dev/
+##
+
+Main.lua
+
+

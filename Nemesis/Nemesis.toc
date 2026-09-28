@@ -1,0 +1,18 @@
+## Interface: 16001
+## Title: Nemesis
+## Notes: Marks and alerts you when watched players appear.
+## IconTexture: Interface\AddOns\Nemesis\Media\Branding\nemesis-icon.tga
+## Author: DefylerZR1
+## Version: 0.3.25
+## SavedVariables: NemesisDB
+## X-Category: PvP
+## X-Part-Of: Defyler Suite
+
+Core.lua
+Database.lua
+Rivalry.lua
+Markers.lua
+Alerts.lua
+Detection.lua
+UI.lua
+Commands.lua

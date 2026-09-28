@@ -1,0 +1,41 @@
+## Title: DXM Core |cff774422(Defyler Exchange Market)
+## IconTexture: Interface\Icons\INV_Misc_Coin_01
+## Notes: Defyler Exchange Market scans, values, and compares Auction House listings.
+##
+## Interface: 16001
+## LoadOnDemand: 0
+## Dependencies: DXM_Loader
+## OptionalDependencies: !nLog, SlideBar, Configator, Babylonian, DebugLib, TipHelper, LibExtraTip, LibDataBroker
+## SavedVariables: DXMConfig, DXMData, DXMServers, DXMVendorPrices, DXMShoppingList, DXMLedgerData
+## SavedVariablesPerCharacter: DXMLocal
+##
+## Version: 0.14.19
+## Revision: $Id$
+## Author: DefylerZR1
+## X-Part-Of: DXM
+## X-Category: Auction House
+## X-Max-Interface: 110000
+## X-URL: https://defyler.dev/
+## X-Feedback: https://defyler.dev/
+##
+
+## Load our libs before anything.
+Libs\Load.xml
+
+## Setup the main variables / structure.
+Main.lua
+
+## Boot up the various bits and pieces...
+Const.lua
+Internal.lua
+Handlers.lua
+FairPricing.lua
+Statistics.lua
+Items.lua
+GUI.lua
+
+## Finish up the boot process and register Load events.
+Register.lua
+
+## Load up any of our active modules now.
+Modules\Active.xml

@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: Defyler Damage Meter
+## IconTexture: Interface\Icons\Ability_Warrior_BattleShout
+## Notes: Defyler skin and controls for WoW Forever's secure damage meter.
+## Author: DefylerZR1
+## Version: 0.4.13
+## SavedVariables: DDMDB
+
+Report.lua
+Percentages.lua
+Core.lua

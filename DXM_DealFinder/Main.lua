@@ -1,0 +1,1 @@
+-- This compatibility addon is retained for existing installations. Its feature is now built into DXM Core.

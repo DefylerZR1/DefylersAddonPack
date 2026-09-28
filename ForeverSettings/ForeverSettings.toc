@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: Forever Settings
+## IconTexture: Interface\Icons\Trade_Engineering
+## Notes: Extended graphics and world-detail controls for WoW Forever.
+## Author: DefylerZR1
+## Version: 0.1.6
+## SavedVariables: ForeverSettingsDB
+
+Core.lua
+UI.lua
