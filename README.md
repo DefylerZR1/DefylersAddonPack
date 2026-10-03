@@ -2,7 +2,7 @@
 
 Public CurseForge distribution source for Defyler's Addon Pack.
 
-The `v1.1.0` tag contains the exact addon payload from Alpha v1.1.0. The CurseForge packager uses `.pkgmeta` to emit DXM and its supporting addons as separate top-level addon folders.
+The `v1.1.1` tag contains the exact addon payload from Alpha v1.1.1. The CurseForge packager uses `.pkgmeta` to emit DXM and its supporting addons as separate top-level addon folders.
 
 DXM Relay is a separate optional Windows companion and is not distributed through CurseForge. Download it from [defyler.dev](https://defyler.dev/download).
 

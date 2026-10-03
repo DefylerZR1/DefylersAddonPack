@@ -9,7 +9,7 @@
 ## SavedVariables: DXMConfig, DXMData, DXMServers, DXMVendorPrices, DXMShoppingList, DXMLedgerData
 ## SavedVariablesPerCharacter: DXMLocal
 ##
-## Version: 0.14.84
+## Version: 0.14.85
 ## Revision: $Id$
 ## Author: DefylerZR1
 ## X-Part-Of: DXM

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1
+
+This hotfix repairs DXM Auction House listing and assigns 2-hour, 8-hour, or 24-hour durations from the selected pricing strategy. It also keeps valuation item icons within their slot.
 ## v1.1.0
 
 This update expands DXM's Auction House, crafting, disenchanting, valuation, Ledger, Earnings, merchant, and quest-assistance workflows. It also adds DDQ and DQA to the addon pack.

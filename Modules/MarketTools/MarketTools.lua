@@ -1134,9 +1134,13 @@ local function buildValuation(page)
     valuationSlot:SetNormalTexture("Interface\\Buttons\\UI-Quickslot2")
     valuationSlot:SetPushedTexture("Interface\\Buttons\\UI-Quickslot-Depress")
     valuationSlot:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+    if valuationSlot.SetClipsChildren then valuationSlot:SetClipsChildren(true) end
+    for _, texture in ipairs({valuationSlot:GetNormalTexture(), valuationSlot:GetPushedTexture(), valuationSlot:GetHighlightTexture()}) do
+        if texture then texture:ClearAllPoints(); texture:SetAllPoints(valuationSlot) end
+    end
     valuationSlot.Icon = valuationSlot:CreateTexture(nil, "ARTWORK")
-    valuationSlot.Icon:SetPoint("TOPLEFT", 7, -7)
-    valuationSlot.Icon:SetPoint("BOTTOMRIGHT", -7, 7)
+    valuationSlot.Icon:SetSize(46, 46)
+    valuationSlot.Icon:SetPoint("CENTER")
     valuationSlot.Icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
     local prompt = page:CreateFontString(nil, "ARTWORK", "GameFontNormal")

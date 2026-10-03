@@ -33,6 +33,13 @@ local MODE_LABELS = {
     undercut = "1c Undercut",
 }
 
+local function durationForMode(mode)
+    local durations = Enum and Enum.AuctionHouseDuration
+    if mode == "undercut" then return durations and durations.Short or 1, "2 hours" end
+    if mode == "market24" then return durations and durations.Medium or 2, "8 hours" end
+    return durations and durations.Long or 3, "24 hours"
+end
+
 local function money(value)
     value = math.max(0, math.floor((tonumber(value) or 0) + .5))
     local gold = math.floor(value / 10000)
@@ -175,8 +182,9 @@ prepareCurrent = function()
 
     icon:SetTexture(entry.icon or 134400)
     itemName:SetText(entry.link or entry.name or ("Item " .. entry.itemID))
-    itemDetail:SetText(("Quantity: %d    %s    Bag %d, slot %d"):format(entry.quantity or 1,
-        entry.isCommodity and "Commodity" or "Item", entry.bag, entry.slot))
+    local _, durationLabel = durationForMode(DXMConfig.sellPriceMode)
+    itemDetail:SetText(("Quantity: %d    %s    Duration: %s    Bag %d, slot %d"):format(entry.quantity or 1,
+        entry.isCommodity and "Commodity" or "Item", durationLabel, entry.bag, entry.slot))
     queueText:SetText(("Listing queue %d of %d"):format(queueIndex, #queue))
     refreshPreview()
 
@@ -277,22 +285,32 @@ local function postCurrent()
         prepareCurrent()
         return
     end
-    local duration = Enum and Enum.AuctionHouseDuration and Enum.AuctionHouseDuration.Medium or 2
+    local duration, durationLabel = durationForMode(DXMConfig.sellPriceMode)
     awaitingPost = {entry=entry, index=queueIndex}
     updateActions()
-    setStatus("Submitting this listing to the Auction House...")
-    local ok, err
+    setStatus("Submitting this " .. durationLabel .. " listing to the Auction House...")
+    local ok, needsConfirmation
     if entry.isCommodity then
         local frame = AuctionHouseFrame and AuctionHouseFrame.CommoditiesSellFrame
-        ok, err = frame and frame.StartPost and pcall(frame.StartPost, frame, location, duration, entry.quantity, currentPrice)
+        ok, needsConfirmation = pcall(C_AuctionHouse.PostCommodity, location, duration, entry.quantity, currentPrice)
+        if ok and needsConfirmation and frame and frame.CachePendingPost then
+            frame:CachePendingPost(location, duration, entry.quantity, currentPrice)
+        end
     else
         local frame = AuctionHouseFrame and AuctionHouseFrame.ItemSellFrame
-        ok, err = frame and frame.StartPost and pcall(frame.StartPost, frame, location, duration, entry.quantity, currentPrice, currentPrice)
+        -- DXM creates buyout-only listings. Passing the buyout as the bid too
+        -- makes Blizzard reject the request because buyout must exceed bid.
+        ok, needsConfirmation = pcall(C_AuctionHouse.PostItem, location, duration, entry.quantity, nil, currentPrice)
+        if ok and needsConfirmation and frame and frame.CachePendingPost then
+            frame:CachePendingPost(location, duration, entry.quantity, nil, currentPrice)
+        end
     end
     if not ok then
         awaitingPost = nil
-        setStatus("Listing failed to start: " .. tostring(err or "Blizzard sell frame unavailable"), true)
+        setStatus("Listing failed to start: " .. tostring(needsConfirmation or "Blizzard rejected the request"), true)
         updateActions()
+    elseif needsConfirmation then
+        setStatus("Confirm Blizzard's price warning to list this item.")
     end
 end
 
