@@ -155,7 +155,7 @@ local function finishLiveQuery(entry)
     currentPrice, currentPriceSource = choosePrice("undercut", nil, lowest)
     if currentPrice then
         priceText:SetText(("%s per unit  |cff888888(%s)|r"):format(money(currentPrice), currentPriceSource))
-        setStatus("Ready. List posts the full quantity shown, then advances after Blizzard confirms it.")
+        setStatus("Ready. List prepares Blizzard\'s sell form; click Create Auction there to post.")
     else
         priceText:SetText("No current listing to undercut")
         setStatus("No current listing was found. Choose a market-average option or Skip.", true)
@@ -209,7 +209,7 @@ prepareCurrent = function()
         currentPrice, currentPriceSource = choosePrice(mode, summary)
         if currentPrice and currentPrice > 0 then
             priceText:SetText(("%s per unit  |cff888888(%s)|r"):format(money(currentPrice), currentPriceSource))
-            setStatus("Ready. List posts the full quantity shown, then advances after Blizzard confirms it.")
+            setStatus("Ready. List prepares Blizzard\'s sell form; click Create Auction there to post.")
         else
             priceText:SetText("No " .. (MODE_LABELS[mode] or "selected") .. " data")
             setStatus("This item has no price for the selected strategy. Choose another option or Skip.", true)
@@ -288,29 +288,36 @@ local function postCurrent()
     local duration, durationLabel = durationForMode(DXMConfig.sellPriceMode)
     awaitingPost = {entry=entry, index=queueIndex}
     updateActions()
-    setStatus("Submitting this " .. durationLabel .. " listing to the Auction House...")
-    local ok, needsConfirmation
-    if entry.isCommodity then
-        local frame = AuctionHouseFrame and AuctionHouseFrame.CommoditiesSellFrame
-        ok, needsConfirmation = pcall(C_AuctionHouse.PostCommodity, location, duration, entry.quantity, currentPrice)
-        if ok and needsConfirmation and frame and frame.CachePendingPost then
-            frame:CachePendingPost(location, duration, entry.quantity, currentPrice)
+    setStatus("Preparing Blizzard's " .. durationLabel .. " sell form...")
+
+    -- The posting APIs are protected. Populate Blizzard's native form and let
+    -- its untainted Create Auction button perform the protected action.
+    local ok, err = pcall(function()
+        AuctionHouseFrame:SetPostItem(location)
+        local frame = entry.isCommodity and AuctionHouseFrame.CommoditiesSellFrame
+            or AuctionHouseFrame.ItemSellFrame
+        if not frame or frame:GetItem() == nil then
+            error("Blizzard did not accept that bag item")
         end
-    else
-        local frame = AuctionHouseFrame and AuctionHouseFrame.ItemSellFrame
-        -- DXM creates buyout-only listings. Passing the buyout as the bid too
-        -- makes Blizzard reject the request because buyout must exceed bid.
-        ok, needsConfirmation = pcall(C_AuctionHouse.PostItem, location, duration, entry.quantity, nil, currentPrice)
-        if ok and needsConfirmation and frame and frame.CachePendingPost then
-            frame:CachePendingPost(location, duration, entry.quantity, nil, currentPrice)
+        if frame.Duration and frame.Duration.SetDuration then
+            frame.Duration:SetDuration(duration)
         end
-    end
+        if frame.QuantityInput and frame.QuantityInput.SetQuantity then
+            frame.QuantityInput:SetQuantity(entry.quantity)
+        end
+        if not entry.isCommodity and frame.SetSecondaryPriceInputEnabled then
+            frame:SetSecondaryPriceInputEnabled(false)
+        end
+        if frame.PriceInput and frame.PriceInput.SetAmount then
+            frame.PriceInput:SetAmount(currentPrice)
+        end
+        if frame.UpdatePostState then frame:UpdatePostState() end
+    end)
     if not ok then
         awaitingPost = nil
-        setStatus("Listing failed to start: " .. tostring(needsConfirmation or "Blizzard rejected the request"), true)
+        setStatus("Unable to prepare Blizzard's sell form: " .. tostring(err), true)
         updateActions()
-    elseif needsConfirmation then
-        setStatus("Confirm Blizzard's price warning to list this item.")
+        if DXMExchange and DXMExchange.Open then DXMExchange:Open("sell") end
     end
 end
 
@@ -346,7 +353,10 @@ events:SetScript("OnEvent", function(_, event, ...)
         local postedIndex = awaitingPost.index
         awaitingPost = nil
         if queueIndex == postedIndex then queueIndex = queueIndex + 1 end
-        C_Timer.After(.10, prepareCurrent)
+        C_Timer.After(.10, function()
+            if DXMExchange and DXMExchange.Open then DXMExchange:Open("sell") end
+            prepareCurrent()
+        end)
         return
     end
     if event == "AUCTION_HOUSE_SHOW_ERROR" and awaitingPost then
@@ -354,6 +364,7 @@ events:SetScript("OnEvent", function(_, event, ...)
         awaitingPost = nil
         setStatus("Blizzard rejected this listing (error " .. tostring(errorCode or "unknown") .. "). You can retry or Skip.", true)
         updateActions()
+        if DXMExchange and DXMExchange.Open then DXMExchange:Open("sell") end
         return
     end
     local request = pendingQuery
@@ -448,7 +459,8 @@ local function buildPage(parent)
     end)
     page:SetScript("OnHide", function()
         queryGeneration = queryGeneration + 1
-        pendingQuery, awaitingPost = nil, nil
+        pendingQuery = nil
+        if awaitingPost then return end
         wipe(queue)
         queueIndex = 0
     end)

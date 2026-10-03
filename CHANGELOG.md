@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.2
+
+This hotfix removes blocked Auction House posting calls. DXM now prepares Blizzard's native sell form with the selected item, quantity, price, and duration, then advances the queue after Blizzard confirms the auction.
+
 ## v1.1.1
 
 This hotfix repairs DXM Auction House listing and assigns 2-hour, 8-hour, or 24-hour durations from the selected pricing strategy. It also keeps valuation item icons within their slot.
