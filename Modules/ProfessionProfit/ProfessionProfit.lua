@@ -625,11 +625,10 @@ local function raisePanel()
     panel:SetFrameStrata(strata)
     panel:SetFrameLevel(pageLevel)
 
-    local chromeLevel = pageLevel + 20
-    for _, key in ipairs({"NineSlice", "TitleContainer", "PortraitContainer", "CloseButton"}) do
-        local region = parent[key]
-        if region and region.SetFrameStrata then region:SetFrameStrata(strata) end
-        if region and region.SetFrameLevel then region:SetFrameLevel(chromeLevel) end
+    local chromeLevel = pageLevel + 40
+    if parent.DXMProfessionHostBorder then
+        parent.DXMProfessionHostBorder:SetFrameStrata(strata)
+        parent.DXMProfessionHostBorder:SetFrameLevel(chromeLevel)
     end
     if parent.ProfessionsOverviewTab then parent.ProfessionsOverviewTab:SetFrameLevel(chromeLevel + 1) end
     for _, nativeTab in ipairs(parent.rightProfessionTabs or {}) do nativeTab:SetFrameLevel(chromeLevel + 1) end
@@ -639,7 +638,171 @@ local function hideProfessionPages(frame)
     if frame.BookPage then frame.BookPage:Hide() end
     if frame.CraftingPage then frame.CraftingPage:Hide() end
 end
+DXMHostStyle = DXMHostStyle or {}
+local HOST_CHROME_KEYS = {"NineSlice", "TitleContainer", "PortraitContainer", "CloseButton"}
+
+local function hideNativeHostChrome(frame)
+    if ButtonFrameTemplate_HidePortrait then ButtonFrameTemplate_HidePortrait(frame) end
+    for _, key in ipairs(HOST_CHROME_KEYS) do
+        local region = frame[key]
+        if region and region.Hide then region:Hide() end
+    end
+end
+
+local function guardNativeHostChrome(frame)
+    if frame.DXMHostChromeGuarded then return end
+    frame.DXMHostChromeGuarded = true
+    for _, key in ipairs(HOST_CHROME_KEYS) do
+        local region = frame[key]
+        if region and region.HookScript then
+            region:HookScript("OnShow", function(self)
+                if frame.DXMHostStyleActive then self:Hide() end
+            end)
+        end
+    end
+end
+
+local function createProfessionHostBorder(frame)
+    local border = CreateFrame("Frame", nil, frame)
+    border:SetAllPoints(frame)
+    border:EnableMouse(false)
+
+    local function line(color, ...)
+        local texture = border:CreateTexture(nil, "OVERLAY")
+        texture:SetColorTexture(color[1], color[2], color[3], color[4])
+        for index = 1, select("#", ...), 5 do
+            local point, relativeTo, relativePoint, x, y = select(index, ...)
+            texture:SetPoint(point, relativeTo, relativePoint, x, y)
+        end
+        return texture
+    end
+
+    -- defyler.dev: hairline #33283f and accent #c9a4f4.
+    local outer = {.20, .157, .247, 1}
+    local accent = {.788, .643, .957, 1}
+    border.OuterTop = line(outer, "TOPLEFT", border, "TOPLEFT", 0, 0, "TOPRIGHT", border, "TOPRIGHT", 0, 0); border.OuterTop:SetHeight(3)
+    border.OuterBottom = line(outer, "BOTTOMLEFT", border, "BOTTOMLEFT", 0, 0, "BOTTOMRIGHT", border, "BOTTOMRIGHT", 0, 0); border.OuterBottom:SetHeight(3)
+    border.OuterLeft = line(outer, "TOPLEFT", border, "TOPLEFT", 0, 0, "BOTTOMLEFT", border, "BOTTOMLEFT", 0, 0); border.OuterLeft:SetWidth(3)
+    border.OuterRight = line(outer, "TOPRIGHT", border, "TOPRIGHT", 0, 0, "BOTTOMRIGHT", border, "BOTTOMRIGHT", 0, 0); border.OuterRight:SetWidth(3)
+    border.InnerTop = line(accent, "TOPLEFT", border, "TOPLEFT", 3, -3, "TOPRIGHT", border, "TOPRIGHT", -3, -3); border.InnerTop:SetHeight(1)
+    border.InnerBottom = line(accent, "BOTTOMLEFT", border, "BOTTOMLEFT", 3, 3, "BOTTOMRIGHT", border, "BOTTOMRIGHT", -3, 3); border.InnerBottom:SetHeight(1)
+    border.InnerLeft = line(accent, "TOPLEFT", border, "TOPLEFT", 3, -3, "BOTTOMLEFT", border, "BOTTOMLEFT", 3, 3); border.InnerLeft:SetWidth(1)
+    border.InnerRight = line(accent, "TOPRIGHT", border, "TOPRIGHT", -3, -3, "BOTTOMRIGHT", border, "BOTTOMRIGHT", -3, 3); border.InnerRight:SetWidth(1)
+
+    border.Header = border:CreateTexture(nil, "BORDER")
+    border.Header:SetPoint("TOPLEFT", border, "TOPLEFT", 4, -4)
+    border.Header:SetPoint("TOPRIGHT", border, "TOPRIGHT", -4, -4)
+    border.Header:SetHeight(30)
+    border.Header:SetColorTexture(.055, .063, .11, 1)
+    border.HeaderLine = border:CreateTexture(nil, "ARTWORK")
+    border.HeaderLine:SetPoint("TOPLEFT", border.Header, "BOTTOMLEFT", 0, 0)
+    border.HeaderLine:SetPoint("TOPRIGHT", border.Header, "BOTTOMRIGHT", 0, 0)
+    border.HeaderLine:SetHeight(1)
+    border.HeaderLine:SetColorTexture(.20, .157, .247, 1)
+    border.HeaderGlow = border:CreateTexture(nil, "OVERLAY")
+    border.HeaderGlow:SetAllPoints(border.HeaderLine)
+    border.HeaderGlow:SetColorTexture(.788, .643, .957, 1)
+    border.HeaderGlow:SetBlendMode("ADD")
+    border.HeaderGlow:SetAlpha(.18)
+    border.HeaderPulse = border.HeaderGlow:CreateAnimationGroup()
+    local brighten = border.HeaderPulse:CreateAnimation("Alpha"); brighten:SetFromAlpha(.18); brighten:SetToAlpha(.72); brighten:SetDuration(1.4); brighten:SetOrder(1)
+    local soften = border.HeaderPulse:CreateAnimation("Alpha"); soften:SetFromAlpha(.72); soften:SetToAlpha(.18); soften:SetDuration(1.4); soften:SetOrder(2)
+    border.HeaderPulse:SetLooping("REPEAT")
+    border.Title = border:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    border.Title:SetPoint("CENTER", border.Header, "CENTER", 0, 0)
+    border.Title:SetTextColor(.788, .643, .957)
+
+    border.Close = CreateFrame("Button", nil, border)
+    border.Close:SetSize(22, 22)
+    border.Close:SetPoint("TOPRIGHT", border, "TOPRIGHT", -8, -8)
+    border.Close.Background = border.Close:CreateTexture(nil, "BACKGROUND")
+    border.Close.Background:SetAllPoints()
+    border.Close.Background:SetColorTexture(.071, .082, .133, 1)
+    border.Close.Outline = border.Close:CreateTexture(nil, "BORDER")
+    border.Close.Outline:SetPoint("BOTTOMLEFT"); border.Close.Outline:SetPoint("BOTTOMRIGHT"); border.Close.Outline:SetHeight(2)
+    border.Close.Outline:SetColorTexture(.788, .643, .957, 1)
+    border.Close.Text = border.Close:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    border.Close.Text:SetPoint("CENTER", 0, 1); border.Close.Text:SetText("x"); border.Close.Text:SetTextColor(.933, .918, .961)
+    border.Close:SetScript("OnEnter", function(self) self.Background:SetColorTexture(.165, .122, .231, 1) end)
+    border.Close:SetScript("OnLeave", function(self) self.Background:SetColorTexture(.071, .082, .133, 1) end)
+    border.Close:SetScript("OnClick", function() frame:Hide() end)
+    border:Hide()
+    frame.DXMProfessionHostBorder = border
+    return border
+end
+
+local function restoreNativeHostPortrait(frame)
+    if not frame then return end
+    if ButtonFrameTemplate_ShowPortrait then ButtonFrameTemplate_ShowPortrait(frame) end
+    if frame.PortraitContainer then frame.PortraitContainer:Show() end
+    local portrait = frame.GetPortrait and frame:GetPortrait()
+    if portrait and portrait.Show then portrait:Show() end
+end
+
+function DXMHostStyle:RestorePortrait(frame)
+    restoreNativeHostPortrait(frame)
+    C_Timer.After(0, function()
+        if frame and not frame.DXMHostStyleActive then restoreNativeHostPortrait(frame) end
+    end)
+end
+
+function DXMHostStyle:Set(frame, active, title, hideMoney, hideTabs)
+    if not frame then return end
+    local border = frame.DXMProfessionHostBorder or createProfessionHostBorder(frame)
+    if active then
+        if not frame.DXMHostStyleActive then
+            frame.DXMHostStyleState = {}
+            for _, key in ipairs({"TitleContainer", "CloseButton", "MoneyFrameInset", "MoneyFrameBorder"}) do
+                local region = frame[key]
+                if region and region.IsShown then frame.DXMHostStyleState[key] = region:IsShown() end
+            end
+            frame.DXMHostStyleState.tabs = {}
+            if hideTabs then
+                for _, nativeTab in ipairs(frame.Tabs or {}) do
+                    frame.DXMHostStyleState.tabs[#frame.DXMHostStyleState.tabs + 1] = {frame = nativeTab, shown = nativeTab:IsShown()}
+                end
+            end
+        end
+        frame.DXMHostStyleActive = true
+        guardNativeHostChrome(frame)
+        hideNativeHostChrome(frame)
+        if hideMoney and frame.MoneyFrameInset then frame.MoneyFrameInset:Hide() end
+        if hideMoney and frame.MoneyFrameBorder then frame.MoneyFrameBorder:Hide() end
+        if hideTabs then for _, nativeTab in ipairs(frame.Tabs or {}) do nativeTab:Hide() end end
+        border.Title:SetText(title or (frame.GetTitle and frame:GetTitle()) or "DXM")
+        border:SetFrameStrata(frame:GetFrameStrata() or "MEDIUM")
+        border:SetFrameLevel(math.max(frame:GetFrameLevel() + 20, (frame.TitleContainer and frame.TitleContainer:GetFrameLevel() or 0) + 1))
+        border:Show()
+        border.HeaderPulse:Play()
+        C_Timer.After(0, function()
+            if frame.DXMHostStyleActive then
+                hideNativeHostChrome(frame)
+                border:SetFrameLevel(frame:GetFrameLevel() + 41)
+                border:Show()
+            end
+        end)
+    else
+        local state = frame.DXMHostStyleState or {}
+        frame.DXMHostStyleActive = nil
+        border.HeaderPulse:Stop()
+        border.HeaderGlow:SetAlpha(.18)
+        border:Hide()
+        if frame.NineSlice then frame.NineSlice:Show() end
+        for _, key in ipairs({"TitleContainer", "CloseButton", "MoneyFrameInset", "MoneyFrameBorder"}) do
+            local region = frame[key]
+            if region and region.SetShown and state[key] ~= nil then region:SetShown(state[key]) end
+        end
+        for _, tabState in ipairs(state.tabs or {}) do tabState.frame:SetShown(tabState.shown) end
+        frame.DXMHostStyleState = nil
+        self:RestorePortrait(frame)
+    end
+end
+
+local function setProfessionPortraitShown(frame, shown)
+    DXMHostStyle:Set(frame, not shown)
+end
 local function restoreProfessionOverview(frame)
+    setProfessionPortraitShown(frame, true)
     if frame.SelectBookPage then
         frame:SelectBookPage()
     else
@@ -647,30 +810,37 @@ local function restoreProfessionOverview(frame)
         if frame.CraftingPage then frame.CraftingPage:Hide() end
     end
 end
+local function enforceDXMProfessionPage(frame)
+    if not panel or not panel:IsShown() then return end
+    hideProfessionPages(frame)
+    setProfessionPortraitShown(frame, false)
+    raisePanel()
+end
 local function createPanel(frame)
-    panel = CreateFrame("Frame", "DXMProfessionProfitFrame", frame, "InsetFrameTemplate")
+    panel = DXMTheme:CreatePanel(frame, "DXMProfessionProfitFrame")
     panel:SetPoint("TOPLEFT", frame, "TOPLEFT", 3, -21)
     panel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -3, 3)
     panel:SetScript("OnShow", function()
         if _G.DXMDDQFrame then _G.DXMDDQFrame:Hide() end
         if _G.DXMDDQProfessionTab and PanelTemplates_DeselectTab then PanelTemplates_DeselectTab(_G.DXMDDQProfessionTab) end
-        hideProfessionPages(frame)
-        raisePanel()
+        enforceDXMProfessionPage(frame)
     end)
+    panel:SetScript("OnHide", function() setProfessionPortraitShown(frame, true) end)
     raisePanel()
     panel:EnableMouse(true)
     panel:Hide()
     local fill = panel:CreateTexture(nil, "BACKGROUND")
-    fill:SetPoint("TOPLEFT", 4, -4); fill:SetPoint("BOTTOMRIGHT", -4, 4); fill:SetColorTexture(.025, .025, .025, 1)
+    fill:SetPoint("TOPLEFT", 4, -4); fill:SetPoint("BOTTOMRIGHT", -4, 4); fill:SetColorTexture(.035, .043, .078, 1)
 
     titleText = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
     titleText:SetPoint("TOPLEFT", 18, -16); titleText:SetText("DXM Craft Profit")
-    local refresh = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    titleText:SetTextColor(.788, .643, .957)
+    local refresh = DXMTheme:CreateButton(panel)
     refresh:SetSize(120, 25); refresh:SetPoint("TOPRIGHT", -16, -12); refresh:SetText("Refresh Prices"); refresh:SetScript("OnClick", analyze)
-    local queue = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    local queue = DXMTheme:CreateButton(panel)
     queue:SetSize(120, 25); queue:SetPoint("RIGHT", refresh, "LEFT", -8, 0); queue:SetText("Crafting Queue")
     queue:SetScript("OnClick", function() if DXMCraftingQueue then DXMCraftingQueue:Show(panel) end end)
-    local preference = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    local preference = DXMTheme:CreateButton(panel)
     preference:SetSize(130, 25); preference:SetPoint("RIGHT", queue, "LEFT", -8, 0)
     local function refreshPreference() preference:SetText("Plan: " .. (PREFERENCE_LABELS[DXMConfig.craftPlanPreference] or "Balanced")) end
     refreshPreference()
@@ -686,7 +856,7 @@ local function createPanel(frame)
     statusText = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     statusText:SetPoint("TOPLEFT", titleText, "BOTTOMLEFT", 0, -10); statusText:SetPoint("RIGHT", preference, "LEFT", -12, 0); statusText:SetJustifyH("LEFT")
 
-    local list = CreateFrame("Frame", nil, panel, "InsetFrameTemplate")
+    local list = DXMTheme:CreatePanel(panel)
     list:SetPoint("TOPLEFT", statusText, "BOTTOMLEFT", -6, -12); list:SetPoint("RIGHT", panel, "RIGHT", -12, 0); list:SetPoint("BOTTOM", panel, "BOTTOM", 0, 56)
     local header = CreateFrame("Frame", nil, list)
     header:SetPoint("TOPLEFT", 5, -5); header:SetPoint("TOPRIGHT", -5, -5); header:SetHeight(22)
@@ -732,10 +902,10 @@ local function createPanel(frame)
     header:SetScript("OnSizeChanged", function(_, width) if width > 0 then layout(width) end end)
     C_Timer.After(0, function() if header:GetWidth() > 0 then layout(header:GetWidth()) end end)
 
-    previousButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate"); previousButton:SetSize(28,22); previousButton:SetPoint("BOTTOMLEFT",panel,"BOTTOMLEFT",18,15); previousButton:SetText("<"); previousButton:SetScript("OnClick",function() pageOffset=pageOffset-PAGE_SIZE; updateRows() end)
-    nextButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate"); nextButton:SetSize(28,22); nextButton:SetPoint("LEFT",previousButton,"RIGHT",5,0); nextButton:SetText(">"); nextButton:SetScript("OnClick",function() pageOffset=pageOffset+PAGE_SIZE; updateRows() end)
+    previousButton = DXMTheme:CreateButton(panel); previousButton:SetSize(28,22); previousButton:SetPoint("BOTTOMLEFT",panel,"BOTTOMLEFT",18,15); previousButton:SetText("<"); previousButton:SetScript("OnClick",function() pageOffset=pageOffset-PAGE_SIZE; updateRows() end)
+    nextButton = DXMTheme:CreateButton(panel); nextButton:SetSize(28,22); nextButton:SetPoint("LEFT",previousButton,"RIGHT",5,0); nextButton:SetText(">"); nextButton:SetScript("OnClick",function() pageOffset=pageOffset+PAGE_SIZE; updateRows() end)
     countText = panel:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); countText:SetPoint("LEFT",nextButton,"RIGHT",10,0)
-    local back = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate"); back:SetSize(145,25); back:SetPoint("BOTTOMRIGHT",-14,14); back:SetText("Return to Profession"); back:SetScript("OnClick",function() panel:Hide(); if tab then PanelTemplates_DeselectTab(tab) end; restoreProfessionOverview(frame) end)
+    local back = DXMTheme:CreateButton(panel); back:SetSize(145,25); back:SetPoint("BOTTOMRIGHT",-14,14); back:SetText("Return to Profession"); back:SetScript("OnClick",function() panel:Hide(); if tab then PanelTemplates_DeselectTab(tab) end; restoreProfessionOverview(frame) end)
 end
 
 local function ensureUI()
@@ -752,7 +922,13 @@ local function ensureUI()
         PanelTemplates_DeselectTab(tab)
         tab:SetScript("OnClick", function()
             if panel:IsShown() then panel:Hide(); PanelTemplates_DeselectTab(tab); restoreProfessionOverview(frame)
-            else panel:Show(); raisePanel(); PanelTemplates_SelectTab(tab); analyze() end
+            else
+                panel:Show()
+                PanelTemplates_SelectTab(tab)
+                enforceDXMProfessionPage(frame)
+                C_Timer.After(0, function() enforceDXMProfessionPage(frame) end)
+                analyze()
+            end
         end)
         tab:Show()
 

@@ -1,0 +1,20 @@
+## Title: DXM: |cff9955ffDQA
+## IconTexture: Interface\Icons\INV_Misc_Map_01
+## Notes: Defyler's Quest Assistance marks targeted quest objectives.
+##
+## Interface: 16001
+## LoadOnDemand: 0
+## Dependencies: DXM_Loader
+## SavedVariables: DQADB
+##
+## Version: 0.1.16
+## Author: DefylerZR1
+## X-Part-Of: DXM
+## X-Category: Quests
+## X-Max-Interface: 110000
+## X-URL: https://defyler.dev/
+## X-Feedback: https://defyler.dev/
+##
+
+Main.lua
+

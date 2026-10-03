@@ -46,12 +46,15 @@ function Accounting.UpdateSale(row)
 end
 
 function Accounting.Summary(rows)
-    local result = {spent=0, received=0, deposits=0, pending=0, profit=0, known=0, unknown=0}
+    local result = {spent=0, received=0, deposits=0, pending=0, profit=0, known=0, unknown=0, tradeEarned=0, tradeSpent=0}
     for _, row in ipairs(rows) do
         local timestamp = tonumber(row.timestamp)
         if timestamp then result.since = math.min(result.since or timestamp, timestamp) end
         if row.kind == "purchase" then result.spent = result.spent + (tonumber(row.total) or 0) end
         if row.kind == "posting" then result.deposits = result.deposits + (tonumber(row.deposit) or 0) end
+        if row.kind == "vendor" and row.status == "sold" then result.received = result.received + (tonumber(row.total) or 0) end
+        if row.kind == "trade" and row.status == "received" then result.tradeEarned = result.tradeEarned + (tonumber(row.total) or 0) end
+        if row.kind == "trade" and row.status == "spent" then result.tradeSpent = result.tradeSpent + (tonumber(row.total) or 0) end
         if row.kind == "mail" and row.status == "sold" then
             if row.collected then
                 result.received = result.received + (tonumber(row.total) or 0)
@@ -63,6 +66,6 @@ function Accounting.Summary(rows)
             result.known = result.known + 1
         end
     end
-    result.cashFlow = result.received - result.spent - result.deposits
+    result.cashFlow = result.received + result.tradeEarned - result.spent - result.deposits - result.tradeSpent
     return result
 end

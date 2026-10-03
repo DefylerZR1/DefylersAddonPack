@@ -7,7 +7,7 @@
 ## Dependencies: DXM_Loader, DXM
 ## SavedVariables: DXMDDQDB, DXMSalvagerDB
 ##
-## Version: 0.1.11
+## Version: 0.1.21
 ## Author: DefylerZR1
 ## X-Part-Of: DXM
 ## X-Category: Professions

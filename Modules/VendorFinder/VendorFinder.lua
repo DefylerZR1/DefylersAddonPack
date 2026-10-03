@@ -2,7 +2,7 @@ if not DXMCore or not DXMExchange then return end
 
 local Module = DXMCore:Module("VendorFinder", "Scanner")
 local Const = DXMCore.Const()
-local PAGE_SIZE = 12
+local PAGE_SIZE = 9
 
 local results = {}
 local resultsByKey = {}
@@ -27,6 +27,9 @@ local quantityGeneration = 0
 local requestNextQuantity
 local minimumProfit = 0
 local minimumROI = 0
+local buyQueueButton
+local queueableResults = {}
+local vendorPage
 
 DXMConfig = DXMConfig or {}
 
@@ -115,33 +118,170 @@ local function purchaseError(message)
 end
 
 local pendingPurchase
+local activePurchase
+local unavailableAuctions = {}
+local purchaseQueue
+local purchaseQueueIndex = 0
+local advancePurchaseQueue
 local cursorBuyDialogPendingUntil = 0
+local cursorBuyDialogTargetX
+local cursorBuyDialogTargetY
+local cursorBuyDialogGeneration = 0
 
-local function positionBuyDialogAtCursor(dialog)
-    if not dialog or not dialog:IsShown() then return end
-    local x, y = GetCursorPosition()
-    local scale = UIParent:GetEffectiveScale()
-    if not x or not y or not scale or scale <= 0 then return end
+local function stopPurchaseQueue(message)
+    purchaseQueue = nil
+    purchaseQueueIndex = 0
+    pendingPurchase = nil
+    activePurchase = nil
+    if message then setStatus(message) end
+    if updateRows then updateRows() end
+end
+
+local function findDialogAcceptButton(dialog, preferred)
+    if preferred then return preferred end
+    if dialog.GetButton1 then
+        local button = dialog:GetButton1()
+        if button then return button end
+    end
+    if dialog.button1 then return dialog.button1 end
+    if dialog.Button1 then return dialog.Button1 end
+    if dialog.buttons and dialog.buttons[1] then return dialog.buttons[1] end
+    if dialog.Buttons and dialog.Buttons[1] then return dialog.Buttons[1] end
+    local name = dialog.GetName and dialog:GetName()
+    if name and _G[name .. "Button1"] then return _G[name .. "Button1"] end
+
+    local leftmost
+    local leftmostX
+    if dialog.GetChildren then
+        local children = { dialog:GetChildren() }
+        for _, child in ipairs(children) do
+            if child and child.IsObjectType and child:IsObjectType("Button") and child:IsShown() then
+                local text = child.GetText and child:GetText()
+                if text == ACCEPT or text == YES then return child end
+                local childX = child:GetCenter()
+                if childX and (not leftmostX or childX < leftmostX) then
+                    leftmost = child
+                    leftmostX = childX
+                end
+            end
+        end
+    end
+    return leftmost
+end
+
+local function positionDialogButtonAtCursor(dialog, preferredButton)
+    if not dialog or not dialog:IsShown() or not cursorBuyDialogTargetX or not cursorBuyDialogTargetY then return false end
+    local button = findDialogAcceptButton(dialog, preferredButton)
+    if not button then return false end
+    local uiScale = UIParent:GetEffectiveScale()
+    local dialogScale = dialog:GetEffectiveScale()
+    local buttonScale = button:GetEffectiveScale()
+    if not uiScale or uiScale <= 0 or not dialogScale or dialogScale <= 0 or not buttonScale or buttonScale <= 0 then return false end
+    local dialogX, dialogY = dialog:GetCenter()
+    local buttonX, buttonY = button:GetCenter()
+    if not dialogX or not dialogY or not buttonX or not buttonY then return false end
+
+    -- Convert every measurement to physical screen pixels before calculating the
+    -- translation. Popup/button scales can differ from UIParent's scale.
+    local targetDialogX = ((dialogX * dialogScale) + cursorBuyDialogTargetX - (buttonX * buttonScale)) / uiScale
+    local targetDialogY = ((dialogY * dialogScale) + cursorBuyDialogTargetY - (buttonY * buttonScale)) / uiScale
     dialog:SetClampedToScreen(true)
     dialog:ClearAllPoints()
-    dialog:SetPoint("LEFT", UIParent, "BOTTOMLEFT", (x / scale) + 18, y / scale)
+    dialog:SetPoint("CENTER", UIParent, "BOTTOMLEFT", targetDialogX, targetDialogY)
+    return true
+end
+
+local function positionBuyoutPopup(popup)
+    if not popup or not popup:IsShown() or popup.which ~= "BUYOUT_AUCTION" then return end
+    local accept = popup.GetButton1 and popup:GetButton1() or popup.button1 or _G[popup:GetName() .. "Button1"]
+    local cancel = popup.GetButton2 and popup:GetButton2() or popup.button2 or _G[popup:GetName() .. "Button2"]
+    if cancel and not cancel.DXMPurchaseQueueCancelHooked then
+        cancel.DXMPurchaseQueueCancelHooked = true
+        cancel:HookScript("OnClick", function()
+            activePurchase = nil
+            if purchaseQueue then stopPurchaseQueue("Purchase queue canceled.") end
+        end)
+    end
+    positionDialogButtonAtCursor(popup, accept)
+end
+
+local function positionBuyoutPopupAtCursor()
+    for index = 1, (STATICPOPUP_NUMDIALOGS or 4) do
+        local popup = _G["StaticPopup" .. index]
+        if popup and popup:IsShown() and popup.which == "BUYOUT_AUCTION" then
+            positionBuyoutPopup(popup)
+            return
+        end
+    end
+end
+
+local function scheduleCursorBuyDialogPosition(generation)
+    local delays = { 0, .01, .03, .06, .12 }
+    for _, delay in ipairs(delays) do
+        C_Timer.After(delay, function()
+            if generation ~= cursorBuyDialogGeneration or GetTime() > cursorBuyDialogPendingUntil then return end
+            local dialog = AuctionHouseFrame and AuctionHouseFrame.BuyDialog
+            if dialog and dialog:IsShown() then
+                positionDialogButtonAtCursor(dialog, dialog.BuyNowButton)
+            end
+            positionBuyoutPopupAtCursor()
+        end)
+    end
+end
+
+local function hookBuyoutPopups()
+    for index = 1, (STATICPOPUP_NUMDIALOGS or 4) do
+        local popup = _G["StaticPopup" .. index]
+        if popup and not popup.DXMCursorPositionHooked then
+            popup.DXMCursorPositionHooked = true
+            if hooksecurefunc and popup.Resize then
+                hooksecurefunc(popup, "Resize", function(self)
+                    if GetTime() <= cursorBuyDialogPendingUntil then positionBuyoutPopup(self) end
+                end)
+            end
+        end
+    end
 end
 
 local function armCursorBuyDialog()
+    cursorBuyDialogTargetX, cursorBuyDialogTargetY = GetCursorPosition()
+    if not cursorBuyDialogTargetX or not cursorBuyDialogTargetY then return end
+    cursorBuyDialogGeneration = cursorBuyDialogGeneration + 1
+    local generation = cursorBuyDialogGeneration
     cursorBuyDialogPendingUntil = GetTime() + 10
+    hookBuyoutPopups()
     local dialog = AuctionHouseFrame and AuctionHouseFrame.BuyDialog
-    if not dialog then return end
-    if not dialog.DXMCursorPositionHooked then
+    if dialog and not dialog.DXMCursorPositionHooked then
         dialog.DXMCursorPositionHooked = true
         dialog:HookScript("OnShow", function(self)
             if GetTime() <= cursorBuyDialogPendingUntil then
-                C_Timer.After(0, function() positionBuyDialogAtCursor(self) end)
+                positionDialogButtonAtCursor(self, self.BuyNowButton)
+                scheduleCursorBuyDialogPosition(cursorBuyDialogGeneration)
             end
         end)
+        if dialog.CancelButton then
+            dialog.CancelButton:HookScript("OnClick", function()
+                activePurchase = nil
+                if purchaseQueue then stopPurchaseQueue("Purchase queue canceled.") end
+            end)
+        end
     end
-    C_Timer.After(0, function()
-        if GetTime() <= cursorBuyDialogPendingUntil then positionBuyDialogAtCursor(dialog) end
-    end)
+    scheduleCursorBuyDialogPosition(generation)
+end
+
+local function skipQueuedPurchase(message)
+    if not purchaseQueue then return false end
+    pendingPurchase = nil
+    purchaseQueueIndex = purchaseQueueIndex + 1
+    if message then setStatus(message) end
+    C_Timer.After(.10, advancePurchaseQueue)
+    return true
+end
+
+local function invalidateScannedTier(result)
+    if DXMSalvage and DXMSalvage.MarkUnavailable then
+        DXMSalvage.MarkUnavailable(result and result.itemKey, result and result.buyout)
+    end
 end
 
 local function finishCommodityPurchase(result)
@@ -154,13 +294,16 @@ local function finishCommodityPurchase(result)
     if maximumBuyout > 0 and unitPrice > maximumBuyout then
         pendingPurchase = nil
         purchaseError(("DXM: purchase canceled. Live price %s exceeds the scanned price %s."):format(money(unitPrice), money(maximumBuyout)))
-        setStatus(("Purchase canceled: live price %s exceeds scanned price %s."):format(money(unitPrice), money(maximumBuyout)))
+        local message=("Skipped: live price %s exceeds scanned price %s."):format(money(unitPrice), money(maximumBuyout))
+        setStatus(message)
+        skipQueuedPurchase(message)
         return true
     end
     if purchaseLimit <= 0 or unitPrice >= purchaseLimit then
         pendingPurchase = nil
         purchaseError("DXM: the current price is no longer profitable.")
         setStatus("Purchase canceled: current price is no longer profitable.")
+        skipQueuedPurchase("Skipped an item that is no longer profitable.")
         return true
     end
     pendingPurchase = nil
@@ -177,23 +320,37 @@ local function finishItemPurchase(result)
         local auction = C_AuctionHouse.GetItemSearchResultInfo(result.itemKey, index)
         local buyout = auction and tonumber(auction.buyoutAmount) or 0
         if buyout > 0 and (tonumber(auction.bidAmount) or 0)<=0
+            and not unavailableAuctions[auction.auctionID]
             and not (DXMScanner and DXMScanner.IsPurchasedAuction and DXMScanner.IsPurchasedAuction(auction.auctionID))
             and (not bestAuction or buyout < bestAuction.buyoutAmount) then
             bestAuction = {auctionID = auction.auctionID, buyoutAmount = buyout}
         end
     end
     if not bestAuction then return false end
+    local request = pendingPurchase
     pendingPurchase = nil
     local purchaseLimit = tonumber(result.purchaseLimit) or tonumber(result.vendor) or 0
     local maximumBuyout = tonumber(result.maximumBuyout) or 0
     if maximumBuyout > 0 and bestAuction.buyoutAmount > maximumBuyout then
+        invalidateScannedTier(result)
         purchaseError(("DXM: purchase canceled. Live buyout %s exceeds the scanned cost %s."):format(money(bestAuction.buyoutAmount), money(maximumBuyout)))
-        setStatus(("Purchase canceled: live buyout %s exceeds scanned cost %s."):format(money(bestAuction.buyoutAmount), money(maximumBuyout)))
+        local message=("Skipped: live buyout %s exceeds scanned cost %s."):format(money(bestAuction.buyoutAmount), money(maximumBuyout))
+        setStatus(message)
+        skipQueuedPurchase(message)
     elseif purchaseLimit <= 0 or bestAuction.buyoutAmount >= purchaseLimit then
+        invalidateScannedTier(result)
         purchaseError("DXM: the current buyout is no longer profitable.")
         setStatus("Purchase canceled: current buyout is no longer profitable.")
+        skipQueuedPurchase("Skipped an item that is no longer profitable.")
     else
-        setStatus("Current buyout loaded. Confirm the purchase in Blizzard's dialog.")
+        setStatus(purchaseQueue and ("Queue %d/%d: confirm this purchase. Cancel stops the queue."):format(purchaseQueueIndex,#purchaseQueue)
+            or "Current buyout loaded. Confirm the purchase in Blizzard's dialog.")
+        activePurchase = {
+            result = result,
+            auctionID = bestAuction.auctionID,
+            fromQueue = request and request.fromQueue == true,
+            retryCount = request and tonumber(request.retryCount) or 0,
+        }
         armCursorBuyDialog()
         AuctionHouseFrame:StartItemBuyout(bestAuction.auctionID, bestAuction.buyoutAmount)
     end
@@ -203,7 +360,37 @@ end
 local purchaseEvents = CreateFrame("Frame")
 purchaseEvents:RegisterEvent("COMMODITY_SEARCH_RESULTS_RECEIVED")
 purchaseEvents:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
+purchaseEvents:RegisterEvent("AUCTION_HOUSE_SHOW_ERROR")
+purchaseEvents:RegisterEvent("AUCTION_HOUSE_CLOSED")
 purchaseEvents:SetScript("OnEvent", function(_, event, ...)
+    if event == "AUCTION_HOUSE_CLOSED" then
+        if purchaseQueue then stopPurchaseQueue("Purchase queue stopped because the Auction House closed.") end
+        return
+    end
+    if event == "AUCTION_HOUSE_SHOW_ERROR" then
+        local errorCode = ...
+        local itemNotFound = Enum and Enum.AuctionHouseError and Enum.AuctionHouseError.ItemNotFound or 4
+        local itemNotAvailable = Enum and Enum.AuctionHouseError and Enum.AuctionHouseError.ItemNotAvailable or 25
+        local failed = activePurchase
+        activePurchase = nil
+        if failed and (errorCode == itemNotFound or errorCode == itemNotAvailable) then
+            unavailableAuctions[failed.auctionID] = true
+            if (failed.retryCount or 0) >= 9 then
+                if failed.fromQueue then skipQueuedPurchase("Too many competing purchases; advancing queue.")
+                else setStatus("No stable auction remained at the scanned price.") end
+                return
+            end
+            pendingPurchase = {
+                result = failed.result,
+                isCommodity = false,
+                fromQueue = failed.fromQueue,
+                retryCount = (failed.retryCount or 0) + 1,
+            }
+            setStatus("That auction sold. Loading the next available listing...")
+            AuctionHouseFrame:QueryItem(AuctionHouseSearchContext.BuyItems, failed.result.itemKey)
+        end
+        return
+    end
     local pendingData = pendingPurchase
     if pendingData then
         local result = pendingData.result
@@ -212,7 +399,23 @@ purchaseEvents:SetScript("OnEvent", function(_, event, ...)
             if not itemID or itemID == result.itemKey.itemID then finishCommodityPurchase(result) end
         elseif event == "ITEM_SEARCH_RESULTS_UPDATED" and not pendingData.isCommodity then
             local itemKey = ...
-            if not itemKey or DXMCore:ItemKeyKey(itemKey) == DXMCore:ItemKeyKey(result.itemKey) then finishItemPurchase(result) end
+            if not itemKey or DXMCore:ItemKeyKey(itemKey) == DXMCore:ItemKeyKey(result.itemKey) then
+                if C_AuctionHouse.HasFullItemSearchResults and not C_AuctionHouse.HasFullItemSearchResults(result.itemKey) then
+                    if C_AuctionHouse.RequestMoreItemSearchResults then C_AuctionHouse.RequestMoreItemSearchResults(result.itemKey) end
+                    return
+                end
+                local handled=finishItemPurchase(result)
+                if not handled then
+                    invalidateScannedTier(result)
+                    if pendingData.fromQueue then
+                        skipQueuedPurchase("No eligible auction remains; advancing queue.")
+                    else
+                        pendingPurchase = nil
+                        purchaseError("DXM: no eligible auction remains at the scanned price.")
+                        setStatus("No eligible auction remains at the scanned price.")
+                    end
+                end
+            end
         end
     end
 
@@ -253,7 +456,7 @@ purchaseEvents:SetScript("OnEvent", function(_, event, ...)
     C_Timer.After(0.10, requestNextQuantity)
 end)
 
-local function buyResult(result)
+local function buyResult(result, fromQueue)
     if not result or not result.itemKey or not AuctionHouseFrame then return end
     local purchaseLimit = tonumber(result.purchaseLimit) or tonumber(result.vendor) or 0
     if result.buyout <= 0 or purchaseLimit <= result.buyout then
@@ -268,7 +471,7 @@ local function buyResult(result)
     end
 
     GameTooltip:Hide()
-    pendingPurchase = {result = result, isCommodity = itemKeyInfo.isCommodity}
+    pendingPurchase = {result = result, isCommodity = itemKeyInfo.isCommodity, fromQueue = fromQueue == true}
     if itemKeyInfo.isCommodity then
         if finishCommodityPurchase(result) then return end
         setStatus("Loading the current commodity price...")
@@ -282,20 +485,61 @@ local function buyResult(result)
     local request = pendingPurchase
     C_Timer.After(5, function()
         if pendingPurchase == request then
-            pendingPurchase = nil
-            purchaseError("DXM: current auction details did not load. Right-click again.")
-            setStatus("Purchase request timed out; right-click the row to retry.")
+            if request.fromQueue then
+                stopPurchaseQueue("Purchase queue stopped because current auction details timed out.")
+            else
+                pendingPurchase = nil
+                purchaseError("DXM: current auction details did not load. Right-click again.")
+                setStatus("Purchase request timed out; right-click the row to retry.")
+            end
         end
     end)
 end
 
+advancePurchaseQueue = function()
+    if not purchaseQueue or pendingPurchase then return end
+    local result = purchaseQueue[purchaseQueueIndex]
+    if not result then
+        stopPurchaseQueue("Purchase queue complete.")
+        return
+    end
+    buyResult(result, true)
+end
+
+local function buyQueue(entries)
+    if pendingPurchase or purchaseQueue then
+        purchaseError("DXM: a purchase or purchase queue is already active.")
+        return
+    end
+    if not entries or #entries == 0 then
+        purchaseError("DXM: no loaded filtered auctions are available to queue.")
+        return
+    end
+    purchaseQueue = {}
+    for _, result in ipairs(entries) do purchaseQueue[#purchaseQueue + 1] = result end
+    purchaseQueueIndex = 1
+    setStatus(("Purchase queue ready: %d confirmations. Cancel stops the queue."):format(#purchaseQueue))
+    advancePurchaseQueue()
+end
+
+local function passesFilters(result, profitMinimum, roiMinimum)
+    local unitProfit = tonumber(result and result.profit) or 0
+    local roi = tonumber(result and result.roi) or 0
+    return unitProfit >= (tonumber(profitMinimum) or 0)
+        and roi >= (tonumber(roiMinimum) or 0)
+        and (result.quantityAtPrice == nil or result.quantityAtPrice > 0)
+end
+
 updateRows = function()
     local visible = {}
+    wipe(queueableResults)
     for _, result in ipairs(results) do
-        local profit = tonumber(result.totalProfit) or tonumber(result.profit) or 0
-        local roi = tonumber(result.roi) or 0
-        if profit >= minimumProfit and roi >= minimumROI
-            and (result.quantityAtPrice==nil or result.quantityAtPrice>0) then visible[#visible + 1] = result end
+        if passesFilters(result, minimumProfit, minimumROI) then
+            visible[#visible + 1] = result
+            if tonumber(result.quantityAtPrice) and result.quantityAtPrice > 0 then
+                queueableResults[#queueableResults + 1] = result
+            end
+        end
     end
     local total = #visible
     local maxOffset = math.max(0, total - PAGE_SIZE)
@@ -335,6 +579,11 @@ updateRows = function()
     end
     if previousButton then previousButton:SetEnabled(pageOffset > 0) end
     if nextButton then nextButton:SetEnabled(pageOffset < maxOffset) end
+    if buyQueueButton then
+        local count = #queueableResults
+        buyQueueButton:SetText(count > 0 and ("Buy Queue (" .. count .. ")") or "Buy Queue")
+        buyQueueButton:SetEnabled(count > 0 and not pendingPurchase and not purchaseQueue)
+    end
 end
 
 local function addResult(item, name, link, quality, icon, vendor)
@@ -365,21 +614,60 @@ local function addResult(item, name, link, quality, icon, vendor)
     table.insert(results, result)
 end
 
-local function evaluateItem(item)
+local function resolveItemInfo(item)
     local itemID = item.itemKey and item.itemKey.itemID
-    if not itemID then return true end
+    if not itemID then return false end
 
     local query = item.itemData and item.itemData.appearanceLink or itemID
-    local name, link, quality, _, _, _, _, _, _, icon, vendor = C_Item.GetItemInfo(query)
-    if not name and query ~= itemID then
-        name, link, quality, _, _, _, _, _, _, icon, vendor = C_Item.GetItemInfo(itemID)
+    local name, link, quality, _, _, _, _, _, _, icon, appearanceVendor = C_Item.GetItemInfo(query)
+    local baseName, baseLink, baseQuality, _, _, _, _, _, _, baseIcon, baseVendor
+    if query == itemID then
+        baseName, baseLink, baseQuality, baseIcon, baseVendor = name, link, quality, icon, appearanceVendor
+    else
+        baseName, baseLink, baseQuality, _, _, _, _, _, _, baseIcon, baseVendor = C_Item.GetItemInfo(itemID)
     end
-    if not name then return false end
+    -- Browse appearance links frequently have a display name before their
+    -- vendor value is available. The base item record owns the dependable
+    -- sell price, so do not mark this item resolved until that record loads.
+    if not baseName then return false end
+    local vendor = tonumber(appearanceVendor) or 0
+    if vendor <= 0 then vendor = tonumber(baseVendor) or 0 end
+    return true, name or baseName, link or baseLink, quality or baseQuality, icon or baseIcon, vendor
+end
+
+local function evaluateItem(item)
+    local resolved, name, link, quality, icon, vendor = resolveItemInfo(item)
+    if not resolved then return false end
     addResult(item, name, link, quality, icon, vendor)
     return true
 end
 
+local function vendorPageVisible()
+    if not vendorPage or not AuctionHouseFrame or not AuctionHouseFrame:IsShown() then return false end
+    if vendorPage.IsVisible then return vendorPage:IsVisible() end
+    return vendorPage:IsShown()
+end
+
+local function pauseQuantityLookup()
+    quantityGeneration = quantityGeneration + 1
+    quantityPending = nil
+    wipe(quantityQueue)
+end
+
+local function resumeQuantityLookup()
+    if not vendorPageVisible() then return end
+    wipe(quantityQueue)
+    for _, result in ipairs(results) do
+        if result.quantityAtPrice == nil then quantityQueue[#quantityQueue + 1] = result end
+    end
+    if #quantityQueue > 0 then
+        setStatus(("Loading exact quantities for %d below-vendor items..."):format(#quantityQueue))
+        requestNextQuantity()
+    end
+end
+
 requestNextQuantity = function()
+    if not vendorPageVisible() then return end
     if quantityPending then return end
     if #quantityQueue == 0 then
         setStatus(("Scan complete: %d below-vendor items found; exact quantities loaded."):format(#results))
@@ -406,18 +694,12 @@ requestNextQuantity = function()
 end
 
 local function beginQuantityLookup()
-    quantityGeneration = quantityGeneration + 1
-    quantityPending = nil
-    wipe(quantityQueue)
+    pauseQuantityLookup()
     for _, result in ipairs(results) do
         result.quantityAtPrice = nil
         result.totalProfit = nil
-        quantityQueue[#quantityQueue + 1] = result
     end
-    if #quantityQueue > 0 then
-        setStatus(("Found %d below-vendor items. Loading exact quantities at each minimum price..."):format(#results))
-        requestNextQuantity()
-    end
+    resumeQuantityLookup()
 end
 
 local function finishProcessing()
@@ -496,11 +778,22 @@ local function sendScanQuery(destination)
 end
 
 local function buildPage(page)
-    local scan = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    vendorPage = page
+    local scan = DXMTheme:CreateButton(page)
     scan:SetSize(150, 25)
     scan:SetPoint("TOPRIGHT", page, "TOPRIGHT", -8, -2)
     scan:SetText("Scan Auction House")
     scan:SetScript("OnClick", function() sendScanQuery("vendor") end)
+
+    buyQueueButton = DXMTheme:CreateButton(page)
+    buyQueueButton:SetSize(118, 25)
+    buyQueueButton:SetPoint("RIGHT", scan, "LEFT", -8, 0)
+    buyQueueButton:SetText("Buy Queue")
+    buyQueueButton:SetEnabled(false)
+    buyQueueButton:SetScript("OnClick", function()
+        buyQueue(queueableResults)
+        updateRows()
+    end)
 
     statusText = page:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     statusText:SetPoint("TOPLEFT", page.Description, "BOTTOMLEFT", 0, -15)
@@ -561,10 +854,10 @@ local function buildPage(page)
     minimumProfit = parseMoney(profitInput:GetText())
     minimumROI = parseROI(roiInput:GetText())
 
-    local resultList = CreateFrame("Frame", nil, page, "InsetFrameTemplate")
+    local resultList = DXMTheme:CreatePanel(page)
     resultList:SetPoint("TOPLEFT", filters, "BOTTOMLEFT", -6, -7)
     resultList:SetPoint("RIGHT", page, "RIGHT", -8, 0)
-    resultList:SetHeight(342)
+    resultList:SetHeight(PAGE_SIZE * 25 + 42)
 
     local header = CreateFrame("Frame", nil, resultList)
     header:SetPoint("TOPLEFT", resultList, "TOPLEFT", 5, -5)
@@ -750,13 +1043,13 @@ local function buildPage(page)
         if header and header:GetWidth() > 0 then layoutColumns(header:GetWidth()) end
     end)
 
-    previousButton = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    previousButton = DXMTheme:CreateButton(page)
     previousButton:SetSize(28, 22)
     previousButton:SetPoint("TOPLEFT", resultList, "BOTTOMLEFT", 4, -6)
     previousButton:SetText("<")
     previousButton:SetScript("OnClick", function() pageOffset = math.max(0, pageOffset - PAGE_SIZE) updateRows() end)
 
-    nextButton = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    nextButton = DXMTheme:CreateButton(page)
     nextButton:SetSize(28, 22)
     nextButton:SetPoint("LEFT", previousButton, "RIGHT", 5, 0)
     nextButton:SetText(">")
@@ -771,11 +1064,21 @@ local function buildPage(page)
         if delta < 0 then pageOffset = pageOffset + PAGE_SIZE else pageOffset = pageOffset - PAGE_SIZE end
         updateRows()
     end)
+    page:HookScript("OnShow", resumeQuantityLookup)
+    page:HookScript("OnHide", pauseQuantityLookup)
     updateRows()
 end
 
 function Module:Boot(hook)
     hook(Const.ScannerItemsCompleted, Module.ScannerItemsCompleted)
+    hook(Const.ScannerPurchaseCompleted, Module.ScannerPurchaseCompleted)
+end
+
+function Module:ScannerPurchaseCompleted()
+    activePurchase = nil
+    if not purchaseQueue then return end
+    purchaseQueueIndex = purchaseQueueIndex + 1
+    C_Timer.After(.15, advancePurchaseQueue)
 end
 
 function Module:ScannerItemsCompleted(items)
@@ -794,6 +1097,8 @@ DXMVendorFinder = {
     FormatMoney = money,
     OpenResult = openResult,
     BuyResult = buyResult,
+    BuyQueue = buyQueue,
+    PurchaseActive = function() return pendingPurchase~=nil or purchaseQueue~=nil end,
 }
 
 DXMExchange:RegisterPageBuilder("vendor", buildPage)

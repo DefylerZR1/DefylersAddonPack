@@ -8,6 +8,7 @@
 	<Include file="VendorFinder\Embed.xml"/>
 	<Include file="DisenchantTracker\Embed.xml"/>
 	<Include file="MarketTools\Embed.xml"/>
+	<Include file="SellQueue\Embed.xml"/>
 	<Include file="Config\Embed.xml"/>
 	<Include file="ProfessionProfit\Embed.xml"/>
     <Include file="MerchantBuyList\Embed.xml"/>

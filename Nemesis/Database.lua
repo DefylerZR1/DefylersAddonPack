@@ -1,5 +1,9 @@
 local N = Nemesis
 
+local function isSecret(value)
+    return issecretvalue and issecretvalue(value)
+end
+
 local defaults = {
     schemaVersion = 1,
     settings = {
@@ -31,17 +35,21 @@ function N:SplitCharacter(text, realmOverride)
 end
 
 function N:UnitIdentity(unit)
-    if not UnitExists(unit) then return end
-    if UnitIsUnit and UnitIsUnit(unit, "player") then return end
-    local guid = UnitGUID(unit)
-    if guid and UnitGUID("player") == guid then return end
+    local exists = UnitExists(unit)
+    if isSecret(exists) or not exists then return end
+    if UnitIsUnit then
+        local isPlayer = UnitIsUnit(unit, "player")
+        if isSecret(isPlayer) or isPlayer then return end
+    end
     local name, realm
     if UnitFullName then name, realm = UnitFullName(unit) end
+    if isSecret(name) or isSecret(realm) then return end
     if not name or name == "" then name = UnitName(unit) end
+    if isSecret(name) then return end
     if not name then return end
     realm = realm and realm ~= "" and realm or (GetRealmName and GetRealmName()) or ""
     local _, _, key = self:SplitCharacter(name, realm)
-    return name, realm, key, guid
+    return name, realm, key
 end
 
 function N:InitializeDB()
@@ -52,7 +60,7 @@ function N:InitializeDB()
 end
 
 function N:GetEntryByUnit(unit)
-    local name, realm, key, guid = self:UnitIdentity(unit)
+    local name, realm, key = self:UnitIdentity(unit)
     if not key then return end
     local entry = self.db.entries[key]
     if not entry then
@@ -78,7 +86,7 @@ function N:GetEntryByUnit(unit)
         elseif name and name ~= "" then
             entry.displayName = trim(name)
         end
-        return entry, key, name, realm, guid
+        return entry, key, name, realm
     end
 end
 
@@ -87,6 +95,7 @@ function N:EnsureEntryOrder()
     for key, entry in pairs(self.db.entries) do
         local slot = math.floor(tonumber(entry.order) or 0)
         if slot > 0 and not used[slot] then entry.order=slot; used[slot]=true else unordered[#unordered+1]={key=key,entry=entry} end
+        entry.guid = nil
         entry.kills = math.max(0, math.floor(tonumber(entry.kills) or 0))
         entry.deaths = math.max(0, math.floor(tonumber(entry.deaths) or 0))
     end
@@ -143,9 +152,8 @@ function N:MoveEntry(key, delta)
     if target then entry.order,target.entry.order=target.entry.order,entry.order; if self.RefreshUI then self:RefreshUI(key) end end
 end
 
-function N:GetEntryByCombatant(name, guid)
-    if guid then for key,entry in pairs(self.db.entries) do if entry.guid==guid then return entry,key end end end
-    if not name then return end
+function N:GetEntryByCombatant(name)
+    if not name or isSecret(name) then return end
     local clean=name:match("^[^|]+") or name
     local _,_,key=self:SplitCharacter(clean)
     local entry=key and self.db.entries[key]

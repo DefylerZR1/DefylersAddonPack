@@ -87,6 +87,22 @@ function Ledger:RegisterRefresh(callback)
     if type(callback) == "function" then refreshers[callback] = true end
 end
 
+function Ledger:GetTransactions()
+    return market().transactions
+end
+
+function Ledger:RecordTrade(delta, timestamp)
+    delta = math.floor(tonumber(delta) or 0)
+    if delta == 0 then return end
+    return append("trade", {
+        status = delta > 0 and "received" or "spent",
+        total = math.abs(delta),
+        timestamp = timestamp,
+        source = "player trade",
+        name = "Player trade",
+    })
+end
+
 local function addPurchaseLot(row)
     if not row.itemID or row.total <= 0 then return end
     local data = market()
@@ -129,6 +145,51 @@ local function consumeCost(itemID, quantity, timestamp, owner, suffix)
     return cost, matched, quantity - matched
 end
 
+function Ledger:PreviewCost(itemID, quantity, timestamp, owner, suffix)
+    quantity = math.max(1, math.floor(tonumber(quantity) or 1))
+    timestamp, owner = timestamp or now(), owner or character()
+    local data = market()
+    local needed, cost, matched = quantity, 0, 0
+    for _, lot in ipairs(data.lots) do
+        if needed <= 0 then break end
+        if tonumber(lot.itemID) == tonumber(itemID) and (tonumber(lot.remaining) or 0) > 0
+            and (not lot.character or lot.character == owner) and (tonumber(lot.acquiredAt) or 0) <= timestamp + 5
+            and (suffix==nil or (lot.itemKey and (tonumber(lot.itemKey.itemSuffix) or 0)==suffix)
+                or (suffix==0 and not lot.itemKey)) then
+            local available = tonumber(lot.remaining) or 0
+            local take = math.min(needed, available)
+            local lotCost = tonumber(lot.remainingCost) or 0
+            local assigned = take == available and lotCost or math.floor(lotCost * take / available + 0.5)
+            if lot.costKnown ~= false then cost, matched = cost + assigned, matched + take end
+            needed = needed - take
+        end
+    end
+    return cost, matched, quantity - matched
+end
+
+function Ledger:RecordVendorSale(fields)
+    if type(fields) ~= "table" then return end
+    local quantity = math.max(1, math.floor(tonumber(fields.quantity) or 1))
+    local total = math.max(0, math.floor(tonumber(fields.total) or 0))
+    local suffix = DXMLedgerAccounting.Suffix(fields.itemLink)
+    local cost, matched, unmatched = consumeCost(fields.itemID, quantity, fields.timestamp, fields.character, suffix)
+    local complete = matched == quantity and unmatched == 0
+    local row = append("vendor", {
+        status="sold", source="merchant", collected=true,
+        timestamp=fields.timestamp, character=fields.character,
+        itemID=fields.itemID, itemLink=fields.itemLink,
+        name=fields.name or itemName(fields.itemID, fields.itemLink),
+        quantity=quantity, total=total, saleProceeds=total, gross=total,
+        costAssigned=true, costBasis=cost, costQuantity=matched, unmatchedQuantity=unmatched,
+        confidence=complete and "FIFO" or (matched > 0 and "partial cost; profit unknown" or "unknown cost"),
+    })
+    if complete then
+        row.profit = total - cost
+        row.roi = cost > 0 and row.profit / cost * 100 or nil
+    end
+    notify()
+    return row
+end
 local function assignSaleCost(row)
     if row.status ~= "sold" or not row.collected then return end
     if row.itemID and not row.costAssigned then
@@ -264,6 +325,78 @@ local function recordPendingPurchase(delta)
     pendingPurchase = nil
 end
 
+local auctionTotalsText
+
+local function auctionMoney(value)
+    value = math.max(0, math.floor(tonumber(value) or 0))
+    local gold = math.floor(value / 10000)
+    local silver = math.floor((value % 10000) / 100)
+    local copper = value % 100
+    if gold > 0 then return ("%dg %02ds %02dc"):format(gold, silver, copper) end
+    if silver > 0 then return ("%ds %02dc"):format(silver, copper) end
+    return copper .. "c"
+end
+
+function Ledger:GetOwnedAuctionTotals()
+    local totals = {activeCount = 0, activeValue = 0, soldCount = 0, soldValue = 0}
+    if not C_AuctionHouse or not C_AuctionHouse.GetNumOwnedAuctions or not C_AuctionHouse.GetOwnedAuctionInfo then
+        return totals, false
+    end
+
+    local complete = not C_AuctionHouse.HasFullOwnedAuctionResults or C_AuctionHouse.HasFullOwnedAuctionResults()
+    local soldStatus = Enum and Enum.AuctionStatus and Enum.AuctionStatus.Sold
+    for index = 1, (tonumber(C_AuctionHouse.GetNumOwnedAuctions()) or 0) do
+        local info = C_AuctionHouse.GetOwnedAuctionInfo(index)
+        if info then
+            local sold = soldStatus ~= nil and info.status == soldStatus
+            if sold then
+                -- Blizzard already reports the full incoming amount for sold rows.
+                totals.soldCount = totals.soldCount + 1
+                totals.soldValue = totals.soldValue + (tonumber(info.buyoutAmount) or tonumber(info.bidAmount) or 0)
+            else
+                -- Active buyout/bid values are per unit in the owned-auction list.
+                local quantity = math.max(1, math.floor(tonumber(info.quantity) or 1))
+                local unitValue = tonumber(info.buyoutAmount) or tonumber(info.bidAmount) or 0
+                totals.activeCount = totals.activeCount + 1
+                totals.activeValue = totals.activeValue + (unitValue * quantity)
+            end
+        end
+    end
+    totals.totalValue = totals.activeValue + totals.soldValue
+    return totals, complete
+end
+
+local function updateAuctionTotals()
+    if not auctionTotalsText then return end
+
+    local totals, complete = Ledger:GetOwnedAuctionTotals()
+    if not complete then
+        auctionTotalsText:SetText("Auction totals loading...")
+        return
+    end
+
+    auctionTotalsText:SetFormattedText(
+        "|cffffd100Active:|r %d auctions  %s    |cffffd100Sold:|r %d  %s    |cffffd100Total:|r %s",
+        totals.activeCount, auctionMoney(totals.activeValue),
+        totals.soldCount, auctionMoney(totals.soldValue), auctionMoney(totals.totalValue)
+    )
+end
+
+local function createAuctionTotals()
+    local auctionsFrame = AuctionHouseFrame and AuctionHouseFrame.AuctionsFrame
+    local list = auctionsFrame and auctionsFrame.AllAuctionsList
+    if auctionTotalsText or not list or not auctionsFrame.CancelAuctionButton then return end
+
+    local text = list:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    text:SetPoint("LEFT", auctionsFrame, "BOTTOMLEFT", 188, -11)
+    text:SetPoint("RIGHT", auctionsFrame.CancelAuctionButton, "LEFT", -14, 0)
+    text:SetHeight(24)
+    text:SetJustifyH("LEFT")
+    text:SetWordWrap(false)
+    auctionTotalsText = text
+    updateAuctionTotals()
+end
+
 local function snapshotOwned()
     if not C_AuctionHouse or not C_AuctionHouse.GetNumOwnedAuctions or not C_AuctionHouse.GetOwnedAuctionInfo then return end
     local data = market()
@@ -292,6 +425,7 @@ local function snapshotOwned()
             owned.status, owned.closedAt = "awaiting mail", now()
         end
     end
+    updateAuctionTotals()
     notify()
 end
 
@@ -377,6 +511,7 @@ end
 function Module:AuctionHouseOpened()
     hookAuctionFrame()
     hookPostingFrames()
+    createAuctionTotals()
     snapshotOwned()
 end
 
@@ -409,9 +544,9 @@ local function buildLedger(parent, compact)
     search:SetAutoFocus(false); search:SetTextInsets(6,6,0,0)
     local searchHint = search:CreateFontString(nil,"OVERLAY","GameFontDisableSmall")
     searchHint:SetPoint("LEFT",8,0); searchHint:SetText("Search item or character")
-    local statusButton = CreateFrame("Button",nil,filter,"UIPanelButtonTemplate")
+    local statusButton = DXMTheme:CreateButton(filter)
     statusButton:SetSize(115,22); statusButton:SetPoint("TOPLEFT",0,-30)
-    local rangeButton = CreateFrame("Button",nil,filter,"UIPanelButtonTemplate")
+    local rangeButton = DXMTheme:CreateButton(filter)
     rangeButton:SetSize(96,22); rangeButton:SetPoint("LEFT",statusButton,"RIGHT",8,0)
     local status = CreateFrame("Frame", nil, view)
     status:SetPoint("TOPLEFT", filter, "BOTTOMLEFT", 0, -4)
@@ -553,7 +688,7 @@ local function buildLedger(parent, compact)
                 totals.since and date("%m/%d",totals.since) or "--"))
         end
         for _,h in ipairs(headers) do h.button.Label:SetText(h.col[1]..(sortKey==h.col[2] and (ascending and " ^" or " v") or "")) end
-        statusButton:SetText("Status: "..statusFilters[statusIndex]); rangeButton:SetText(ranges[rangeIndex][1])
+        statusButton:SetText(statusFilters[statusIndex]); rangeButton:SetText(ranges[rangeIndex][1])
         local height=math.max(1,scroll:GetHeight())
         content:SetHeight(math.max(height,#list*rowHeight))
         scroll:SetVerticalScroll(math.min(scroll:GetVerticalScroll() or 0,math.max(0,#list*rowHeight-height)))
@@ -574,7 +709,7 @@ local function buildLedger(parent, compact)
 end
 
 local function buildAHPage(page)
-    local host=CreateFrame("Frame",nil,page,"InsetFrameTemplate")
+    local host=DXMTheme:CreatePanel(page)
     host:SetPoint("TOPLEFT",page.Description,"BOTTOMLEFT",0,-14); host:SetPoint("BOTTOMRIGHT",page,"BOTTOMRIGHT",-12,12)
     buildLedger(host,false)
 end
@@ -584,16 +719,82 @@ local characterTab, characterPanel
 local CHARACTER_LEDGER_FRAME = "DXMCharacterLedgerFrame"
 local CHARACTER_LEDGER_ICON = "Interface\\AddOns\\DXM\\Media\\defylers_ledger_icon.png"
 
+local function restoreCharacterFramePortrait()
+    local function refreshPortrait()
+        if not CharacterFrame or not CharacterFrame:IsShown() or (characterPanel and characterPanel:IsShown()) then return end
+        if DXMHostStyle and DXMHostStyle.RestorePortrait then
+            DXMHostStyle:RestorePortrait(CharacterFrame)
+        elseif ButtonFrameTemplate_ShowPortrait then
+            ButtonFrameTemplate_ShowPortrait(CharacterFrame)
+            if CharacterFrame.PortraitContainer then CharacterFrame.PortraitContainer:Show() end
+        end
+        if CharacterFrame.UpdatePortrait then
+            CharacterFrame:UpdatePortrait()
+        elseif CharacterFrame.GetPortrait and SetPortraitTexture then
+            SetPortraitTexture(CharacterFrame:GetPortrait(), "player")
+        end
+    end
+    refreshPortrait()
+    C_Timer.After(0, refreshPortrait)
+end
+
 local function ensureCharacterLedger()
     if characterTab or not CharacterFrame or not CharacterFrame.ModeTabs or not CharacterFrame.ModeTabs.Tabs then return end
 
     characterPanel = CreateFrame("Frame", CHARACTER_LEDGER_FRAME, CharacterFrame, "InsetFrameTemplate")
-    characterPanel:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 8, -54)
-    characterPanel:SetPoint("BOTTOMRIGHT", CharacterFrame, "BOTTOMRIGHT", -8, 8)
+    characterPanel:SetPoint("TOPLEFT", CharacterFrame, "TOPLEFT", 4, -35)
+    characterPanel:SetPoint("BOTTOMRIGHT", CharacterFrame, "BOTTOMRIGHT", -4, 4)
     characterPanel:SetFrameLevel(CharacterFrame:GetFrameLevel() + 20)
-    if characterPanel.Bg then characterPanel.Bg:SetColorTexture(.015, .012, .02, .98) end
+    if characterPanel.Bg then characterPanel.Bg:SetColorTexture(.035, .043, .078, .98) end
     characterPanel:Hide()
-    buildLedger(characterPanel, false)
+
+    local contentHost = CreateFrame("Frame", nil, characterPanel)
+    contentHost:SetPoint("TOPLEFT", characterPanel, "TOPLEFT", 0, 0)
+    contentHost:SetPoint("BOTTOMRIGHT", characterPanel, "BOTTOMRIGHT", 0, 38)
+    local ledgerPage = buildLedger(contentHost, false)
+    local earningsPage = CreateFrame("Frame", nil, contentHost)
+    earningsPage:SetAllPoints(contentHost)
+    earningsPage.Description = earningsPage:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    earningsPage.Description:SetPoint("TOPLEFT", earningsPage, "TOPLEFT", 8, -8)
+    earningsPage.Description:SetText("Track completed Auction House sales, spending, and daily net results.")
+    if DXMEarnings and DXMEarnings.BuildPage then
+        DXMEarnings.BuildPage(earningsPage)
+    end
+    earningsPage:Hide()
+
+    local ledgerBottomTab = DXMTheme:CreateButton(characterPanel)
+    ledgerBottomTab:SetSize(130, 27)
+    ledgerBottomTab:SetPoint("BOTTOMLEFT", characterPanel, "BOTTOMLEFT", 14, 7)
+    ledgerBottomTab:SetText("Ledger")
+    local earningsBottomTab = DXMTheme:CreateButton(characterPanel)
+    earningsBottomTab:SetSize(130, 27)
+    earningsBottomTab:SetPoint("LEFT", ledgerBottomTab, "RIGHT", 8, 0)
+    earningsBottomTab:SetText("Earnings")
+
+    local activeCharacterPage = "ledger"
+    local function setBottomTabSelected(button, selected)
+        button:SetEnabled(not selected)
+        if selected then
+            button.DXMBackground:SetColorTexture(.165, .122, .231, 1)
+            button.DXMAccent:SetColorTexture(.788, .643, .957, 1)
+            button.DXMLabel:SetTextColor(.788, .643, .957, 1)
+        end
+    end
+    local function selectCharacterPage(key)
+        activeCharacterPage = key == "earnings" and "earnings" or "ledger"
+        ledgerPage:SetShown(activeCharacterPage == "ledger")
+        earningsPage:SetShown(activeCharacterPage == "earnings")
+        setBottomTabSelected(ledgerBottomTab, activeCharacterPage == "ledger")
+        setBottomTabSelected(earningsBottomTab, activeCharacterPage == "earnings")
+        local title = activeCharacterPage == "earnings" and "DXM Earnings" or "DXM Ledger"
+        if characterPanel:IsShown() and DXMHostStyle and DXMHostStyle.Set then
+            DXMHostStyle:Set(CharacterFrame, true, title)
+        end
+        if characterPanel:IsShown() and CharacterFrame.SetTitle then CharacterFrame:SetTitle(title) end
+    end
+    ledgerBottomTab:SetScript("OnClick", function() selectCharacterPage("ledger") end)
+    earningsBottomTab:SetScript("OnClick", function() selectCharacterPage("earnings") end)
+    selectCharacterPage("ledger")
 
     local nativePaneState
     characterPanel:SetScript("OnShow", function()
@@ -604,9 +805,11 @@ local function ensureCharacterLedger()
                 nativePane:Hide()
             end
         end
-        if CharacterFrame.SetTitle then CharacterFrame:SetTitle("DXM Ledger") end
+        selectCharacterPage(activeCharacterPage)
     end)
     characterPanel:SetScript("OnHide", function()
+        if DXMHostStyle and DXMHostStyle.Set then DXMHostStyle:Set(CharacterFrame, false) end
+        restoreCharacterFramePortrait()
         for _, state in ipairs(nativePaneState or {}) do state.frame:SetShown(state.shown) end
         nativePaneState = nil
     end)
@@ -640,23 +843,4 @@ local characterInit = CreateFrame("Frame")
 characterInit:RegisterEvent("PLAYER_LOGIN")
 characterInit:SetScript("OnEvent", function() C_Timer.After(0, ensureCharacterLedger) end)
 
-local mailTab, mailPanel
-local function ensureMailTab()
-    if mailTab or not MailFrame or not MailFrameTab2 then return end
-    mailPanel=CreateFrame("Frame","DXMMailLedgerFrame",MailFrame,"InsetFrameTemplate")
-    mailPanel.FocusGamepad=function() end; mailPanel.UnfocusGamepad=function() end
-    mailPanel:SetPoint("TOPLEFT",MailFrame,"TOPLEFT",8,-58); mailPanel:SetPoint("BOTTOMRIGHT",MailFrame,"BOTTOMRIGHT",-8,32); mailPanel:Hide()
-    buildLedger(mailPanel,true)
-    mailTab=CreateFrame("Button","MailFrameTab3",MailFrame,"FriendsFrameTabTemplate")
-    mailTab:SetID(3); mailTab:SetText("DXM"); mailTab:SetPoint("LEFT",MailFrameTab2,"RIGHT",-8,0)
-    PanelTemplates_SetNumTabs(MailFrame,3)
-    mailTab:SetScript("OnClick",function()
-        PanelTemplates_SetTab(MailFrame,3)
-        if MailFrame.activeSubFrame then MailFrame.activeSubFrame:Hide() end
-        MailFrame.activeSubFrame=mailPanel; SetSendMailShowing(false); ButtonFrameTemplate_HideButtonBar(MailFrame); MailFrame:SetTitle("DXM Mail Ledger"); mailPanel:Show()
-    end)
-    hooksecurefunc("MailFrameTab_OnClick",function(_,tabID) if tabID~=3 and mailPanel then mailPanel:Hide() end end)
-end
-local mailInit=CreateFrame("Frame")
-mailInit:RegisterEvent("MAIL_SHOW")
-mailInit:SetScript("OnEvent",function() ensureMailTab() end)
+

@@ -2,6 +2,7 @@
 -- initializing native pooled item buttons from addon code. The reagent bag
 -- remains a native separate container on clients that exclude it from the grid.
 local ready = false
+
 local function initialize()
     if ready or (InCombatLockdown and InCombatLockdown()) then return end
     if not ContainerFrameCombinedBags or not GetCVarBool or not SetCVar then return end

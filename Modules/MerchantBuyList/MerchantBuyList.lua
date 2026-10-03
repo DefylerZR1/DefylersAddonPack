@@ -229,7 +229,7 @@ local function makeRow(previous,index)
     row.Name=row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Name:SetPoint("LEFT",30,0); row.Name:SetPoint("RIGHT",-154,0); row.Name:SetJustifyH("LEFT")
     row.Need=row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Need:SetPoint("RIGHT",-116,0); row.Need:SetWidth(34)
     row.Have=row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Have:SetPoint("RIGHT",-78,0); row.Have:SetWidth(34)
-    row.Buy=CreateFrame("Button",nil,row,"UIPanelButtonTemplate"); row.Buy:SetSize(76,22); row.Buy:SetPoint("RIGHT",-1,0); row.Buy:SetScript("OnClick",function() buyItem(row.item) end)
+    row.Buy=DXMTheme:CreateButton(row); row.Buy:SetSize(76,22); row.Buy:SetPoint("RIGHT",-1,0); row.Buy:SetScript("OnClick",function() buyItem(row.item) end)
     row:RegisterForClicks("RightButtonUp"); row:SetScript("OnClick",function(self,button) if button=="RightButton" and self.item then DXMShopping:Remove(self.item.itemID) end end)
     row:SetScript("OnEnter",function(self) if not self.item then return end; GameTooltip:SetOwner(self,"ANCHOR_RIGHT"); if GameTooltip.SetItemByID then GameTooltip:SetItemByID(self.item.itemID) end; GameTooltip:AddLine("Right-click to remove.",.35,.8,1); GameTooltip:Show() end)
     row:SetScript("OnLeave",function() GameTooltip:Hide() end)
@@ -250,7 +250,7 @@ local function createPanel()
     tab:SetID(3); tab:SetText("DXM"); tab:SetPoint("LEFT",MerchantFrameTab2,"RIGHT",-16,0)
     if PanelTemplates_SetNumTabs then PanelTemplates_SetNumTabs(MerchantFrame,3) end
     if PanelTemplates_TabResize then PanelTemplates_TabResize(tab,0) end
-    panel=CreateFrame("Frame","DXMMerchantCraftingFrame",MerchantFrame,"InsetFrameTemplate")
+    panel=DXMTheme:CreatePanel(MerchantFrame,"DXMMerchantCraftingFrame")
     panel:SetPoint("TOPLEFT",6,-58); panel:SetPoint("BOTTOMRIGHT",-6,35)
     panel:SetToplevel(true); panel:SetScript("OnShow",raisePanel); raisePanel(); panel:EnableMouse(true)
     local fill=panel:CreateTexture(nil,"BACKGROUND"); fill:SetPoint("TOPLEFT",4,-4); fill:SetPoint("BOTTOMRIGHT",-4,4); fill:SetColorTexture(.025,.025,.025,1)
@@ -262,8 +262,8 @@ local function createPanel()
     for _,spec in ipairs({{"Need",-116,34},{"B/B",-78,34},{"Action",-1,76}}) do local t=header:CreateFontString(nil,"ARTWORK","GameFontNormalSmall"); t:SetPoint("RIGHT",spec[2],0); t:SetWidth(spec[3]); t:SetText(spec[1]) end
     local previous=header
     for index=1,ROWS do rows[index]=makeRow(previous,index); previous=rows[index] end
-    local complete=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate"); complete:SetSize(120,23); complete:SetPoint("BOTTOMLEFT",10,9); complete:SetText("Clear Complete"); complete:SetScript("OnClick",function() DXMShopping:ClearCompleted() end)
-    local clear=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate"); clear:SetSize(76,23); clear:SetPoint("LEFT",complete,"RIGHT",5,0); clear:SetText("Clear All"); clear:SetScript("OnClick",function() DXMShopping:ClearAll() end)
+    local complete=DXMTheme:CreateButton(panel); complete:SetSize(120,23); complete:SetPoint("BOTTOMLEFT",10,9); complete:SetText("Clear Complete"); complete:SetScript("OnClick",function() DXMShopping:ClearCompleted() end)
+    local clear=DXMTheme:CreateButton(panel); clear:SetSize(76,23); clear:SetPoint("LEFT",complete,"RIGHT",5,0); clear:SetText("Clear All"); clear:SetScript("OnClick",function() DXMShopping:ClearAll() end)
     tab:SetScript("OnClick",function() MerchantFrame.selectedTab=3; if PanelTemplates_SetTab then PanelTemplates_SetTab(MerchantFrame,3) end; panel:Show(); raisePanel(); DXMShopping:RefreshMerchant() end)
     MerchantFrameTab1:HookScript("OnClick",function() panel:Hide() end); MerchantFrameTab2:HookScript("OnClick",function() panel:Hide() end)
     panel:Hide()

@@ -8,6 +8,7 @@ local PAGE_SIZE = 10
 local running, stopRequested, activeRecipeID, activeRemaining, activeStarted = false, false, nil, 0, false
 local preferredRecipeID
 local suspendedChildren, suspendedRegions = {}, {}
+local refreshScheduled = false
 
 local function suspendOwner()
     wipe(suspendedChildren)
@@ -45,6 +46,21 @@ local function craftable(recipeID)
     return ok and math.max(0, math.floor(tonumber(count) or 0)) or 0
 end
 
+local function tradeSkillReady()
+    if C_TradeSkillUI.IsDataSourceChanging and C_TradeSkillUI.IsDataSourceChanging() then return false end
+    if C_TradeSkillUI.IsTradeSkillReady and not C_TradeSkillUI.IsTradeSkillReady() then return false end
+    return true
+end
+
+local function scheduleRefresh()
+    if refreshScheduled then return end
+    refreshScheduled = true
+    C_Timer.After(.25, function()
+        refreshScheduled = false
+        if panel and panel:IsShown() then Queue:Refresh() end
+    end)
+end
+
 local function queueEntries()
     local list = {}
     for key, recipe in pairs(DXMShoppingList and DXMShoppingList.recipes or {}) do
@@ -73,10 +89,10 @@ end
 
 local function stopQueue(message)
     running, stopRequested, activeRecipeID, activeRemaining, activeStarted = false, false, nil, 0, false
-    if message then setStatus(message) end
     if startButton then startButton:Enable() end
     if stopButton then stopButton:Disable() end
     Queue:Refresh()
+    if message then setStatus(message) end
 end
 
 local function recipeForCurrentProfession()
@@ -111,44 +127,28 @@ local prepareNext
 prepareNext = function()
     if not running then return end
     if InCombatLockdown and InCombatLockdown() then stopQueue("Finish combat, then resume the crafting queue."); return end
-    if C_TradeSkillUI.IsDataSourceChanging and C_TradeSkillUI.IsDataSourceChanging() then
-        C_Timer.After(.25,prepareNext); return
-    end
-    if C_TradeSkillUI.IsTradeSkillReady and not C_TradeSkillUI.IsTradeSkillReady() then
+    if not tradeSkillReady() then
         C_Timer.After(.25,prepareNext); return
     end
 
     local entry,reason,info=recipeForCurrentProfession()
     if not entry then stopQueue(reason); if print and reason then print("|cffffd100DXM:|r "..reason) end; return end
-    if info.isDummyRecipe or info.isGatheringRecipe or info.isRecraft then
+    if info.isDummyRecipe or info.isGatheringRecipe or info.isRecraft or info.isEnchantingRecipe then
         stopQueue(entry.name.." requires Blizzard's normal crafting controls."); return
     end
     local available=craftable(entry.recipeID)
     if available<1 then stopQueue("Not enough materials to craft "..entry.name.."."); return end
     local amount=math.min(entry.crafts,available)
     if info.canCreateMultiple==false then amount=1 end
-    local prepared,message
-    local craftingPage=ProfessionsFrame and ProfessionsFrame.CraftingPage
-    if craftingPage and craftingPage.SelectRecipe and craftingPage.CreateMultipleInputBox then
-        local selected,selectError=pcall(craftingPage.SelectRecipe,craftingPage,info)
-        if selected then
-            local input=craftingPage.CreateMultipleInputBox
-            if input.SetValue then input:SetValue(amount) elseif input.SetNumber then input:SetNumber(amount) end
-            prepared=true
-        else message=tostring(selectError) end
-    elseif CPClassicAPI and CPClassicAPI.PrepareTradeSkill then
-        prepared,message=CPClassicAPI.PrepareTradeSkill(entry.recipeID,amount)
-    else
-        message="The profession interface cannot prepare queued recipes on this client."
-    end
-    if not prepared then stopQueue(message or "The next recipe could not be prepared."); return end
-
     activeRecipeID,activeRemaining,activeStarted=entry.recipeID,amount,false
-    setStatus(("Prepared %d x %s. Click the profession Create button."):format(amount,entry.name))
-    if panel then panel:Hide() end
-    if panelOwner then panelOwner:Hide() end
-    if DXMProfessionTab and PanelTemplates_DeselectTab then PanelTemplates_DeselectTab(DXMProfessionTab) end
-    if print then print(("|cffffd100DXM:|r Prepared %d x %s. Click Create to craft this batch."):format(amount,entry.name)) end
+    local crafted,craftError=pcall(C_TradeSkillUI.CraftRecipe,entry.recipeID,amount)
+    if not crafted then
+        activeRecipeID,activeRemaining,activeStarted=nil,0,false
+        stopQueue(tostring(craftError or "The recipe could not be crafted."))
+        return
+    end
+    setStatus(("Crafting %d x %s. The queue will update as each item finishes."):format(amount,entry.name))
+    if print then print(("|cffffd100DXM:|r Crafting %d x %s from the DXM queue."):format(amount,entry.name)) end
 end
 
 function Queue:Start()
@@ -167,6 +167,17 @@ function Queue:CraftMax(recipeID)
     if not recipe or not current then setStatus("Open the recipe's profession before using Craft Max."); return 0 end
     if recipe.professionID and tonumber(recipe.professionID) ~= tonumber(current.professionID) then
         setStatus("Open " .. (recipe.professionName or "the required profession") .. " before using Craft Max.")
+        return 0
+    end
+    if not tradeSkillReady() then
+        setStatus("Loading profession recipes...")
+        scheduleRefresh()
+        return 0
+    end
+    local info = C_TradeSkillUI.GetRecipeInfo(recipeID)
+    if not info or not info.learned then setStatus("That recipe is not available in the open profession."); return 0 end
+    if info.isDummyRecipe or info.isGatheringRecipe or info.isRecraft or info.isEnchantingRecipe then
+        setStatus((recipe.name or "That recipe") .. " requires Blizzard's normal crafting controls.")
         return 0
     end
     local available = craftable(recipeID)
@@ -199,14 +210,18 @@ function Queue:Refresh()
             row.Profession:SetText(entry.professionName)
             row.Queued:SetText(entry.crafts)
             local same = current and (not entry.professionID or entry.professionID == tonumber(current.professionID))
-            local available = same and craftable(entry.recipeID) or nil
-            row.Available:SetText(available or "--")
+            local ready = same and tradeSkillReady()
+            local info = ready and C_TradeSkillUI.GetRecipeInfo(entry.recipeID) or nil
+            local directCraft = info and info.learned and not info.isDummyRecipe and not info.isGatheringRecipe and not info.isRecraft and not info.isEnchantingRecipe
+            local available = directCraft and craftable(entry.recipeID) or nil
+            row.Available:SetText(same and not ready and "..." or available or "--")
             row.available = available
             row.Minus:SetEnabled(not running or activeRecipeID ~= entry.recipeID)
             row.Plus:SetEnabled(not running or activeRecipeID ~= entry.recipeID)
-            row.Max:SetEnabled(not running and available and available > 0)
+            row.Max:SetEnabled(not running and directCraft and available and available > 0)
             row.Remove:SetEnabled(not running or activeRecipeID ~= entry.recipeID)
             row:Show()
+            if same and not ready then scheduleRefresh() end
         else row:Hide() end
     end
     countText:SetText(("Showing %d-%d of %d queued recipes"):format(#list == 0 and 0 or offset+1, math.min(offset+PAGE_SIZE,#list), #list))
@@ -216,7 +231,8 @@ function Queue:Refresh()
         startButton:SetEnabled(#list > 0)
         stopButton:Disable()
         if #list == 0 then setStatus("Queue is empty. Right-click recipes in DXM Craft Profit to add them.")
-        elseif current then setStatus("Open the required profession and click Prepare Queue. Click the native Create button once per prepared batch.")
+        elseif current and not tradeSkillReady() then setStatus("Loading profession recipes..."); scheduleRefresh()
+        elseif current then setStatus("Open the required profession, then click Craft Next or Craft Max.")
         else setStatus("Open a profession to craft the queued recipes.") end
     end
 end
@@ -236,20 +252,20 @@ local function makeRow(parent, previous, index)
     row.Profession=row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Profession:SetJustifyH("CENTER")
     row.Queued=row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Queued:SetJustifyH("CENTER")
     row.Available=row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Available:SetJustifyH("CENTER")
-    row.Minus=CreateFrame("Button",nil,row,"UIPanelButtonTemplate"); row.Minus:SetSize(28,23); row.Minus:SetText("-"); row.Minus:SetScript("OnClick",function() adjust(row,-1) end)
-    row.Plus=CreateFrame("Button",nil,row,"UIPanelButtonTemplate"); row.Plus:SetSize(28,23); row.Plus:SetText("+"); row.Plus:SetScript("OnClick",function() adjust(row,1) end)
-    row.Max=CreateFrame("Button",nil,row,"UIPanelButtonTemplate"); row.Max:SetSize(72,23); row.Max:SetText("Craft Max"); row.Max:SetScript("OnClick",function() if row.entry then Queue:CraftMax(row.entry.recipeID) end end)
-    row.Remove=CreateFrame("Button",nil,row,"UIPanelButtonTemplate"); row.Remove:SetSize(65,23); row.Remove:SetText("Remove"); row.Remove:SetScript("OnClick",function() if row.entry then DXMShopping:RemoveRecipe(row.entry.recipeID) end end)
+    row.Minus=DXMTheme:CreateButton(row); row.Minus:SetSize(28,23); row.Minus:SetText("-"); row.Minus:SetScript("OnClick",function() adjust(row,-1) end)
+    row.Plus=DXMTheme:CreateButton(row); row.Plus:SetSize(28,23); row.Plus:SetText("+"); row.Plus:SetScript("OnClick",function() adjust(row,1) end)
+    row.Max=DXMTheme:CreateButton(row); row.Max:SetSize(72,23); row.Max:SetText("Craft Max"); row.Max:SetScript("OnClick",function() if row.entry then Queue:CraftMax(row.entry.recipeID) end end)
+    row.Remove=DXMTheme:CreateButton(row); row.Remove:SetSize(65,23); row.Remove:SetText("Remove"); row.Remove:SetScript("OnClick",function() if row.entry then DXMShopping:RemoveRecipe(row.entry.recipeID) end end)
     return row
 end
 
 local function createPanel(owner)
     panelOwner=owner
-    panel=CreateFrame("Frame","DXMCraftingQueueFrame",owner,"InsetFrameTemplate")
+    panel=DXMTheme:CreatePanel(owner,"DXMCraftingQueueFrame")
     panel:SetAllPoints(owner); panel:SetFrameStrata("FULLSCREEN_DIALOG"); panel:SetFrameLevel(1000); panel:SetToplevel(true); panel:EnableMouse(true)
     local fill=panel:CreateTexture(nil,"BACKGROUND"); fill:SetPoint("TOPLEFT",4,-4); fill:SetPoint("BOTTOMRIGHT",-4,4); fill:SetColorTexture(.025,.025,.025,1)
     local title=panel:CreateFontString(nil,"ARTWORK","GameFontNormalLarge"); title:SetPoint("TOPLEFT",18,-16); title:SetText("DXM Crafting Queue")
-    local back=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate"); back:SetSize(125,25); back:SetPoint("TOPRIGHT",-16,-12); back:SetText("Back to Profit"); back:SetScript("OnClick",function() Queue:Stop(); panel:Hide() end)
+    local back=DXMTheme:CreateButton(panel); back:SetSize(125,25); back:SetPoint("TOPRIGHT",-16,-12); back:SetText("Back to Profit"); back:SetScript("OnClick",function() Queue:Stop(); panel:Hide() end)
     statusText=panel:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); statusText:SetPoint("TOPLEFT",title,"BOTTOMLEFT",0,-10); statusText:SetPoint("RIGHT",back,"LEFT",-12,0); statusText:SetJustifyH("LEFT")
     local header=CreateFrame("Frame",nil,panel); header:SetPoint("TOPLEFT",statusText,"BOTTOMLEFT",-6,-12); header:SetPoint("TOPRIGHT",-12,0); header:SetHeight(24)
     local bg=header:CreateTexture(nil,"BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(.16,.12,.05,.95)
@@ -282,11 +298,11 @@ local function createPanel(owner)
     end
     header:SetScript("OnSizeChanged",function(_,width) if width>0 then layout(width) end end)
     C_Timer.After(0,function() if header:GetWidth()>0 then layout(header:GetWidth()) end end)
-    panel.Previous=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate"); panel.Previous:SetSize(30,23); panel.Previous:SetPoint("BOTTOMLEFT",18,15); panel.Previous:SetText("<"); panel.Previous:SetScript("OnClick",function() offset=math.max(0,offset-PAGE_SIZE); Queue:Refresh() end)
-    panel.Next=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate"); panel.Next:SetSize(30,23); panel.Next:SetPoint("LEFT",panel.Previous,"RIGHT",5,0); panel.Next:SetText(">"); panel.Next:SetScript("OnClick",function() offset=offset+PAGE_SIZE; Queue:Refresh() end)
+    panel.Previous=DXMTheme:CreateButton(panel); panel.Previous:SetSize(30,23); panel.Previous:SetPoint("BOTTOMLEFT",18,15); panel.Previous:SetText("<"); panel.Previous:SetScript("OnClick",function() offset=math.max(0,offset-PAGE_SIZE); Queue:Refresh() end)
+    panel.Next=DXMTheme:CreateButton(panel); panel.Next:SetSize(30,23); panel.Next:SetPoint("LEFT",panel.Previous,"RIGHT",5,0); panel.Next:SetText(">"); panel.Next:SetScript("OnClick",function() offset=offset+PAGE_SIZE; Queue:Refresh() end)
     countText=panel:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); countText:SetPoint("LEFT",panel.Next,"RIGHT",10,0)
-    startButton=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate"); startButton:SetSize(120,26); startButton:SetPoint("BOTTOMRIGHT",-112,14); startButton:SetText("Prepare Queue"); startButton:SetScript("OnClick",function() Queue:Start() end)
-    stopButton=CreateFrame("Button",nil,panel,"UIPanelButtonTemplate"); stopButton:SetSize(90,26); stopButton:SetPoint("LEFT",startButton,"RIGHT",6,0); stopButton:SetText("Stop"); stopButton:SetScript("OnClick",function() Queue:Stop() end)
+    startButton=DXMTheme:CreateButton(panel); startButton:SetSize(120,26); startButton:SetPoint("BOTTOMRIGHT",-112,14); startButton:SetText("Craft Next"); startButton:SetScript("OnClick",function() Queue:Start() end)
+    stopButton=DXMTheme:CreateButton(panel); stopButton:SetSize(90,26); stopButton:SetPoint("LEFT",startButton,"RIGHT",6,0); stopButton:SetText("Stop"); stopButton:SetScript("OnClick",function() Queue:Stop() end)
     panel:SetScript("OnShow",function() suspendOwner(); Queue:Refresh() end)
     panel:SetScript("OnHide",restoreOwner)
     panel:Hide()
@@ -299,7 +315,7 @@ function Queue:Show(owner)
 end
 
 local events=CreateFrame("Frame")
-for _,event in ipairs({"TRADE_SKILL_CRAFT_BEGIN","TRADE_SKILL_ITEM_CRAFTED_RESULT","UPDATE_TRADESKILL_CAST_STOPPED","TRADE_SKILL_CLOSE","BAG_UPDATE_DELAYED"}) do
+for _,event in ipairs({"TRADE_SKILL_CRAFT_BEGIN","TRADE_SKILL_ITEM_CRAFTED_RESULT","UPDATE_TRADESKILL_CAST_STOPPED","TRADE_SKILL_CLOSE","TRADE_SKILL_LIST_UPDATE","TRADE_SKILL_DATA_SOURCE_CHANGED","BAG_UPDATE_DELAYED"}) do
     pcall(events.RegisterEvent,events,event)
 end
 events:SetScript("OnEvent",function(_,event,...)
@@ -311,15 +327,13 @@ events:SetScript("OnEvent",function(_,event,...)
             local recipe=DXMShoppingList.recipes[tostring(activeRecipeID)]
             if recipe then DXMShopping:SetRecipeCrafts(activeRecipeID,(tonumber(recipe.crafts) or 0)-1) end
             activeRemaining=activeRemaining-1
+            if activeRemaining<=0 then stopQueue("Batch complete. Click Craft Next to continue.") end
         end
     elseif event=="UPDATE_TRADESKILL_CAST_STOPPED" then
         if running and activeRecipeID then
-            if activeRemaining<=0 then
-                activeRecipeID,activeStarted=nil,false
-                C_Timer.After(.25,prepareNext)
-            else stopQueue("Crafting stopped before the current queued batch finished.") end
+            stopQueue("Crafting stopped before the current queued batch finished.")
         end
     elseif event=="TRADE_SKILL_CLOSE" then
         if running then stopQueue("Queue paused because the profession window closed.") end
-    elseif event=="BAG_UPDATE_DELAYED" then Queue:Refresh() end
+    elseif event=="TRADE_SKILL_LIST_UPDATE" or event=="TRADE_SKILL_DATA_SOURCE_CHANGED" or event=="BAG_UPDATE_DELAYED" then Queue:Refresh() end
 end)

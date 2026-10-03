@@ -15,11 +15,15 @@ end
 local Const = DXMCore.Const()
 local MAX_QUEUE = 50000
 local PREFIX = "DX2"
+local QUEUE_FORMAT_VERSION = 3
+local COMPACTION_BATCH_SIZE = 500
+local queueCompaction
 
 local function ensureTables()
     if type(DXMSharedExport) ~= "table" then DXMSharedExport = {} end
     DXMSharedExport.schema = 2
     if type(DXMSharedExport.queue) ~= "table" then DXMSharedExport.queue = {} end
+    if type(DXMSharedExport.archive) ~= "table" then DXMSharedExport.archive = {} end
     if type(DXMSharedImport) ~= "table" then DXMSharedImport = {} end
     DXMSharedImport.schema = 2
     if type(DXMSharedImport.markets) ~= "table" then DXMSharedImport.markets = {} end
@@ -36,6 +40,94 @@ local function queueSize()
     local count = 0
     for _ in pairs(DXMSharedExport.queue) do count = count + 1 end
     return count
+end
+
+-- Return the stable queue key for a scan observation and its capture time.
+-- Older builds included the scan hour in the table key, retaining another
+-- copy of every item each hour even after Relay imported it.
+local function observationIdentity(record)
+    if type(record) ~= "string" or record:sub(1, 4) ~= PREFIX .. "|" then return end
+    local _, capturedAt, product, ruleset, realm, realmID, market, id = strsplit("|", record)
+    if not capturedAt or not product or not ruleset or not realm or not realmID or not market or not id then return end
+    local marketKey = table.concat({product, ruleset, tostring(realmID) .. "-" .. realm, market}, "::")
+    return "scan:" .. marketKey .. ":" .. id, tonumber(capturedAt) or 0
+end
+
+-- Move superseded hourly scan rows to a recoverable archive in small batches.
+-- Relay reads only queue, while no retained observation is destroyed.
+local function startQueueCompaction()
+    ensureTables()
+    if DXMSharedExport.queueFormat == QUEUE_FORMAT_VERSION or queueCompaction then return end
+
+    queueCompaction = {
+        phase = "find",
+        cursor = nil,
+        keys = {},
+        latest = {},
+        before = 0,
+        archiveIndex = 1,
+    }
+
+    local function continueCompaction()
+        local state = queueCompaction
+        if not state then return end
+        local queue, archive = DXMSharedExport.queue, DXMSharedExport.archive
+        local processed = 0
+
+        if state.phase == "find" then
+            while processed < COMPACTION_BATCH_SIZE do
+                local key, record = next(queue, state.cursor)
+                if not key then
+                    state.phase = "archive"
+                    break
+                end
+                state.cursor = key
+                state.keys[#state.keys + 1] = key
+                state.before = state.before + 1
+                local identity, capturedAt = observationIdentity(record)
+                if identity then
+                    local current = state.latest[identity]
+                    if not current or capturedAt > current.capturedAt
+                        or (capturedAt == current.capturedAt and tostring(key) > tostring(current.key)) then
+                        state.latest[identity] = {key = key, capturedAt = capturedAt, record = record}
+                    end
+                end
+                processed = processed + 1
+            end
+        end
+
+        if state.phase == "archive" then
+            processed = 0
+            while processed < COMPACTION_BATCH_SIZE and state.archiveIndex <= #state.keys do
+                local key = state.keys[state.archiveIndex]
+                local record = queue[key]
+                local identity = observationIdentity(record)
+                if identity then
+                    queue[key] = nil
+                    local keep = state.latest[identity]
+                    if keep and keep.key == key then
+                        queue[identity] = keep.record
+                    elseif record then
+                        archive[key] = record
+                    end
+                end
+                state.archiveIndex = state.archiveIndex + 1
+                processed = processed + 1
+            end
+            if state.archiveIndex > #state.keys then
+                DXMSharedExport.queueFormat = QUEUE_FORMAT_VERSION
+                local before, after = state.before, queueSize()
+                queueCompaction = nil
+                print(("DXM: compacted active upload queue from %d to %d records; older observations were archived."):format(before, after))
+                Module:UpdateDashboard()
+                return
+            end
+        end
+
+        C_Timer.After(0, continueCompaction)
+    end
+
+    C_Timer.After(0, continueCompaction)
 end
 
 function DXMQueueVendorObservation(itemID, unitPrice)
@@ -74,6 +166,7 @@ function Module:Boot(hook)
     hook(Const.ScannerItemsCompleted, Module.ScannerItemsCompleted)
     hook(Const.AuctionHouseOpened, Module.AuctionHouseOpened)
     hook(Const.AuctionHouseClosed, Module.AuctionHouseClosed)
+    startQueueCompaction()
 end
 
 function Module:ScannerItemsCompleted(items)
@@ -81,16 +174,14 @@ function Module:ScannerItemsCompleted(items)
     local capturedAt = GetServerTime()
     local identity = DXMCore:MarketIdentity()
     local marketKey = clean(identity.key)
-    local hour = floor(capturedAt / 3600)
     local queued = queueSize()
 
     for _, item in ipairs(items or {}) do
-        if queued >= MAX_QUEUE then break end
         local key = item.itemKey
         local data = item.itemData
         if key and data and data.minPrice and data.totalQuantity then
             local id = clean(item.id or DXMCore:ItemKeyKey(key))
-            local recordKey = marketKey .. ":" .. hour .. ":" .. id
+            local recordKey = "scan:" .. marketKey .. ":" .. id
             local record = table.concat({
                 PREFIX,
                 capturedAt,
@@ -107,8 +198,10 @@ function Module:ScannerItemsCompleted(items)
                 floor(data.minPrice),
                 floor(data.totalQuantity)
             }, "|")
-            if not DXMSharedExport.queue[recordKey] then queued = queued + 1 end
-            DXMSharedExport.queue[recordKey] = record
+            if DXMSharedExport.queue[recordKey] or queued < MAX_QUEUE then
+                if not DXMSharedExport.queue[recordKey] then queued = queued + 1 end
+                DXMSharedExport.queue[recordKey] = record
+            end
         end
     end
     self:UpdateDashboard()

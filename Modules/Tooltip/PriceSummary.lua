@@ -2,6 +2,48 @@ if not DXMCore then return end
 
 DXMPriceSummary = {}
 
+-- Market stores are keyed by full item identity. Build the commodity mapping
+-- once per store instead of walking every saved item for every tooltip/bag item.
+local sourceIndexes = setmetatable({}, {__mode = "k"})
+local refreshCallbacks = {}
+
+local function itemIDFromKey(candidate)
+    local text = tostring(candidate)
+    return tonumber(text:match("^commodity:(%d+)$") or text:match("^(%d+)"))
+end
+
+local function entryLists(data, key, itemID, commodity)
+    if type(data) ~= "table" then return nil end
+    if not commodity then
+        local entries = data[key]
+        return type(entries) == "table" and {entries} or nil
+    end
+    local index = sourceIndexes[data]
+    if not index then
+        index = {}
+        for candidate, entries in pairs(data) do
+            local id = itemIDFromKey(candidate)
+            if id and type(entries) == "table" then
+                local lists = index[id]
+                if not lists then lists = {}; index[id] = lists end
+                lists[#lists + 1] = entries
+            end
+        end
+        sourceIndexes[data] = index
+    end
+    return index[tonumber(itemID)]
+end
+
+function DXMPriceSummary.RegisterRefresh(callback)
+    if type(callback) == "function" then refreshCallbacks[callback] = true end
+end
+
+function DXMPriceSummary.Invalidate(quiet)
+    sourceIndexes = setmetatable({}, {__mode = "k"})
+    if quiet then return end
+    for callback in pairs(refreshCallbacks) do pcall(callback) end
+end
+
 function DXMPriceSummary.Get(itemKey)
     local key = DXMCore:ItemKeyKey(itemKey)
     local market = DXMCore:AuctionKey()
@@ -27,23 +69,14 @@ function DXMPriceSummary.Get(itemKey)
             observations[timestamp] = {price = price, priority = priority, timestamp = timestamp, source = source}
         end
     end
-    local function matches(candidate)
-        if candidate == key then return true end
-        -- Commodities have one unit market even if saved keys contain item level.
-        return commodity and tonumber(tostring(candidate):match("^(%d+)")) == itemKey.itemID
-    end
     local localMarket = DXMPriceHistoryData and DXMPriceHistoryData[market]
-    for candidate, entries in pairs(localMarket or {}) do
-        if matches(candidate) then
-            for _, row in ipairs(entries) do add(row[1], row[2], 2, "local scan") end
-        end
+    for _, entries in ipairs(entryLists(localMarket, key, itemKey.itemID, commodity) or {}) do
+        for _, row in ipairs(entries) do add(row[1], row[2], 2, "local scan") end
     end
     local function shared(import)
         local data = import and import.markets and import.markets[market]
-        for candidate, entries in pairs(data or {}) do
-            if matches(candidate) then
-                for _, row in ipairs(entries) do add(row.capturedAt, row.price, 1, "shared observation") end
-            end
+        for _, entries in ipairs(entryLists(data, key, itemKey.itemID, commodity) or {}) do
+            for _, row in ipairs(entries) do add(row.capturedAt, row.price, 1, "shared observation") end
         end
     end
     shared(DXMSharedSnapshot)

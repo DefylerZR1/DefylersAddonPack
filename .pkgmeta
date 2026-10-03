@@ -2,6 +2,7 @@ package-as: DXM
 enable-nolib-creation: no
 move-folders:
     DXM/DXM_DDQ: DXM_DDQ
+    DXM/DXM_DQA: DXM_DQA
     DXM/DXM_DealFinder: DXM_DealFinder
     DXM/DXM_Loader: DXM_Loader
     DXM/DXM_SharedData: DXM_SharedData
@@ -15,4 +16,5 @@ move-folders:
 ignore:
     - README.md
     - RELEASE-SOURCE.json
+    - CHANGELOG.md
     - .gitignore

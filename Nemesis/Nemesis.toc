@@ -3,7 +3,7 @@
 ## Notes: Marks and alerts you when watched players appear.
 ## IconTexture: Interface\AddOns\Nemesis\Media\Branding\nemesis-icon.tga
 ## Author: DefylerZR1
-## Version: 0.3.25
+## Version: 0.3.27
 ## SavedVariables: NemesisDB
 ## X-Category: PvP
 ## X-Part-Of: Defyler Suite

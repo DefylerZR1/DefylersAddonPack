@@ -3,6 +3,20 @@ local Const = DXMCore:Const()
 
 local frame = Internal._:Frame()
 
+local blockedActionLog = CreateFrame("Frame")
+blockedActionLog:RegisterEvent("ADDON_ACTION_BLOCKED")
+blockedActionLog:SetScript("OnEvent", function(_, _, addonName, functionName)
+	if addonName ~= "DXM" then return end
+	DXMLocal = DXMLocal or {}
+	DXMLocal.LastBlockedAction = {
+		functionName = tostring(functionName or "unknown"),
+		at = GetServerTime and GetServerTime() or time(),
+	}
+	if DEFAULT_CHAT_FRAME then
+		DEFAULT_CHAT_FRAME:AddMessage("|cffffd100DXM blocked action:|r " .. DXMLocal.LastBlockedAction.functionName)
+	end
+end)
+
 Internal.hookEvents = {
 	'AUCTION_CANCELED',
 	'AUCTION_HOUSE_BROWSE_RESULTS_ADDED',
@@ -321,6 +335,18 @@ function Internal:ItemLinkBreakdown(itemLink)
 end
 
 function Internal:HookTooltip()
+	if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
+		local function itemTooltipReady(tip, data)
+			if tip ~= GameTooltip and tip ~= ItemRefTooltip then return end
+			DXMCore:Trigger(Const.DisplayTooltip, "item", nil, tip, "native", data)
+		end
+		TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, itemTooltipReady)
+		return
+	end
+
+	-- Compatibility fallback for clients without TooltipDataProcessor. Current
+	-- Forever clients use the passive post-call above so DXM never hooks the
+	-- GameTooltip scripts or Show method used while bag clicks are resolved.
 	local tooltip = Internal.libs.TipHelper
 
 	tooltip:Activate()

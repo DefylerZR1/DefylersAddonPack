@@ -3,6 +3,6 @@
 ## IconTexture: Interface\Icons\INV_Misc_Gear_01
 ## Notes: Narrow compatibility guards for known WoW Forever interface load-order defects.
 ## Author: DefylerZR1
-## Version: 0.1.4
+## Version: 0.1.7
 
 Core.lua

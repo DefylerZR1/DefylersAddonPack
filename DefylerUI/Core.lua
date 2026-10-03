@@ -20,12 +20,14 @@ local ignored = {
     StaticPopup3 = true,
     StaticPopup4 = true,
     DamageMeter = true,
+    -- Blizzard bag item actions are protected. Never add geometry hooks,
+    -- drag handles, resize controls, or persistence writes to their owner.
+    ContainerFrameCombinedBags = true,
 }
 
 local explicitFrames = {
     "AuctionHouseFrame",
     "BankFrame",
-    "ContainerFrameCombinedBags",
     "ProfessionsFrame",
     "TradeSkillFrame",
     "LFGParentFrame",
@@ -138,12 +140,14 @@ local function SetFramePoint(frame, ...)
     else frame:SetPoint(...) end
 end
 
-local function CanChange(frame)
+local function CanChange(frame, notifyBlocked)
     if IsForbiddenFrame(frame) then return false end
     if ignored[frame:GetName()] or not GeometrySupported(frame) then return false end
     if UsesDirectGeometry(frame) and InCombatLockdown() then return false end
     if InCombatLockdown and InCombatLockdown() and frame.IsProtected and frame:IsProtected() then
-        UIErrorsFrame:AddMessage("That window cannot be moved during combat.", 1, .2, .2)
+        if notifyBlocked and UIErrorsFrame then
+            UIErrorsFrame:AddMessage("That window cannot be moved during combat.", 1, .2, .2)
+        end
         return false
     end
     return true
@@ -349,7 +353,7 @@ local function CreateTitleHandle(frame)
     end
     handle:RegisterForDrag("LeftButton")
     handle:SetScript("OnDragStart", function(self)
-        if not Database().enabled or not CanChange(self.owner) then return end
+        if not Database().enabled or not CanChange(self.owner, true) then return end
         activeDrags[self.owner] = true
         if UsesDirectGeometry(self.owner) then
             local left, top = GetTopLeftPixels(self.owner)
@@ -401,7 +405,7 @@ end
 
 local function StartScaling(grip)
     local frame = grip.owner
-    if not Database().enabled or not CanChange(frame) then return end
+    if not Database().enabled or not CanChange(frame, true) then return end
     local left, top = GetTopLeftPixels(frame)
     if not left or not top then return end
     TakePositionOwnership(frame)
@@ -678,9 +682,6 @@ end
 if hooksecurefunc then
     hooksecurefunc("ShowUIPanel", ScheduleRestoreShownWindows)
     hooksecurefunc("UpdateUIPanelPositions", ScheduleRestoreShownWindows)
-    if UpdateContainerFrameAnchors then
-        hooksecurefunc("UpdateContainerFrameAnchors", ContainerAnchorsUpdated)
-    end
 end
 
 local eventFrame = CreateFrame("Frame")

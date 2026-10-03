@@ -1,8 +1,8 @@
 if not DXMCore or not DXMShopping or not DXMExchange then return end
 
-local page, status, pending
+local page, status, pending, readyCommodity
 local rows = {}
-local offset, ROW_COUNT = 0, 11
+local offset, ROW_COUNT = 0, 8
 
 local function message(text, alert)
     if status then status:SetText(text) end
@@ -13,7 +13,7 @@ local function finishCommodity(request)
     local quantity,total,maximum=0,0,0
     for index=1,(C_AuctionHouse.GetNumCommoditySearchResults(request.item.itemID) or 0) do
         local result=C_AuctionHouse.GetCommoditySearchResultInfo(request.item.itemID,index)
-        local available=result and (tonumber(result.quantity) or 0) or 0
+        local available=result and math.max(0,(tonumber(result.quantity) or 0)-(tonumber(result.numOwnerItems) or 0)) or 0
         local price=result and (tonumber(result.unitPrice) or 0) or 0
         if available>0 and price>0 then
             local take=math.min(request.item.remaining-quantity,available)
@@ -23,10 +23,14 @@ local function finishCommodity(request)
     end
     pending=nil
     if quantity<request.item.remaining then
+        readyCommodity=nil
         message(("Only %d of %d %s are listed."):format(quantity,request.item.remaining,request.item.name),"DXM: not enough quantity is listed.")
     else
-        message(("Loaded %d x %s. Confirm the purchase in Blizzard's dialog."):format(request.item.remaining,request.item.name))
-        AuctionHouseFrame:StartCommoditiesPurchase(request.item.itemID,request.item.remaining,maximum,total)
+        local unitPrice=total/quantity
+        if AuctionHouseUtil and AuctionHouseUtil.SanitizeAuctionHousePrice then unitPrice=AuctionHouseUtil.SanitizeAuctionHousePrice(unitPrice) end
+        readyCommodity={itemID=request.item.itemID,quantity=request.item.remaining,unitPrice=unitPrice,totalPrice=total,maximum=maximum}
+        DXMShopping:RefreshAuction()
+        message(("Ready to buy %d x %s for %s. Click Buy to request Blizzard's quote."):format(request.item.remaining,request.item.name,GetMoneyString(total)))
     end
 end
 
@@ -54,6 +58,15 @@ end
 
 local function search(item)
     if not item or item.remaining<=0 or not AuctionHouseFrame or not C_AuctionHouse then return end
+    local quote=readyCommodity
+    if quote and quote.itemID==item.itemID and quote.quantity==item.remaining then
+        readyCommodity=nil
+        DXMShopping:RefreshAuction()
+        message(("Requesting Blizzard's quote for %d x %s..."):format(quote.quantity,item.name))
+        AuctionHouseFrame:StartCommoditiesPurchase(quote.itemID,quote.quantity,quote.unitPrice,quote.totalPrice)
+        return
+    end
+    readyCommodity=nil
     if C_AuctionHouse.IsThrottledMessageSystemReady and not C_AuctionHouse.IsThrottledMessageSystemReady() then
         message("The Auction House is busy. Click the item again in a moment.","DXM: Auction House search is busy."); return
     end
@@ -101,7 +114,7 @@ local function makeRow(parent,previous,index)
     row.Need=row:CreateFontString(nil,"ARTWORK","GameFontHighlight"); row.Need:SetPoint("RIGHT",-252,0); row.Need:SetWidth(60)
     row.Owned=row:CreateFontString(nil,"ARTWORK","GameFontHighlight"); row.Owned:SetPoint("RIGHT",-190,0); row.Owned:SetWidth(60)
     row.Remaining=row:CreateFontString(nil,"ARTWORK","GameFontHighlight"); row.Remaining:SetPoint("RIGHT",-126,0); row.Remaining:SetWidth(64)
-    row.Action=CreateFrame("Button",nil,row,"UIPanelButtonTemplate"); row.Action:SetSize(118,26); row.Action:SetPoint("RIGHT",-4,0); row.Action:SetScript("OnClick",function() search(row.item) end)
+    row.Action=DXMTheme:CreateButton(row); row.Action:SetSize(118,26); row.Action:SetPoint("RIGHT",-4,0); row.Action:SetScript("OnClick",function() search(row.item) end)
     row:RegisterForClicks("RightButtonUp")
     row:SetScript("OnClick",function(self,button) if button=="RightButton" and self.item then DXMShopping:Remove(self.item.itemID) end end)
     row:SetScript("OnEnter",tooltip); row:SetScript("OnLeave",function() GameTooltip:Hide() end)
@@ -117,7 +130,10 @@ function DXMShopping:RefreshAuction()
         if item then
             row.Icon:SetTexture((C_Item.GetItemIconByID and C_Item.GetItemIconByID(item.itemID)) or 134400)
             row.Name:SetText(item.name); row.Need:SetText(item.needed); row.Owned:SetText(item.bags.."/"..item.bank); row.Remaining:SetText(item.remaining)
-            if item.remaining>0 then row.Action:SetText("Find "..item.remaining); row.Action:Enable() else row.Action:SetText("Complete"); row.Action:Disable() end
+            if item.remaining>0 then
+                local quoteReady=readyCommodity and readyCommodity.itemID==item.itemID and readyCommodity.quantity==item.remaining
+                row.Action:SetText((quoteReady and "Buy " or "Find ")..item.remaining); row.Action:Enable()
+            else row.Action:SetText("Complete"); row.Action:Disable() end
             row:Show()
         else row:Hide() end
     end
@@ -144,13 +160,13 @@ local function build(parent)
     end
     local previous=header
     for index=1,ROW_COUNT do rows[index]=makeRow(parent,previous,index); previous=rows[index] end
-    parent.Previous=CreateFrame("Button",nil,parent,"UIPanelButtonTemplate"); parent.Previous:SetSize(34,24); parent.Previous:SetPoint("BOTTOMLEFT",4,4); parent.Previous:SetText("<")
+    parent.Previous=DXMTheme:CreateButton(parent); parent.Previous:SetSize(34,24); parent.Previous:SetPoint("BOTTOMLEFT",4,4); parent.Previous:SetText("<")
     parent.Previous:SetScript("OnClick",function() offset=math.max(0,offset-ROW_COUNT); DXMShopping:RefreshAuction() end)
-    parent.Next=CreateFrame("Button",nil,parent,"UIPanelButtonTemplate"); parent.Next:SetSize(34,24); parent.Next:SetPoint("LEFT",parent.Previous,"RIGHT",4,0); parent.Next:SetText(">")
+    parent.Next=DXMTheme:CreateButton(parent); parent.Next:SetSize(34,24); parent.Next:SetPoint("LEFT",parent.Previous,"RIGHT",4,0); parent.Next:SetText(">")
     parent.Next:SetScript("OnClick",function() offset=offset+ROW_COUNT; DXMShopping:RefreshAuction() end)
     parent.Count=parent:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); parent.Count:SetPoint("LEFT",parent.Next,"RIGHT",8,0)
-    local complete=CreateFrame("Button",nil,parent,"UIPanelButtonTemplate"); complete:SetSize(125,24); complete:SetPoint("BOTTOMRIGHT",-88,4); complete:SetText("Clear Complete"); complete:SetScript("OnClick",function() DXMShopping:ClearCompleted() end)
-    local clear=CreateFrame("Button",nil,parent,"UIPanelButtonTemplate"); clear:SetSize(80,24); clear:SetPoint("LEFT",complete,"RIGHT",6,0); clear:SetText("Clear All"); clear:SetScript("OnClick",function() DXMShopping:ClearAll() end)
+    local complete=DXMTheme:CreateButton(parent); complete:SetSize(125,24); complete:SetPoint("BOTTOMRIGHT",-88,4); complete:SetText("Clear Complete"); complete:SetScript("OnClick",function() DXMShopping:ClearCompleted() end)
+    local clear=DXMTheme:CreateButton(parent); clear:SetSize(80,24); clear:SetPoint("LEFT",complete,"RIGHT",6,0); clear:SetText("Clear All"); clear:SetScript("OnClick",function() DXMShopping:ClearAll() end)
     parent:SetScript("OnShow",function() DXMShopping:RefreshAuction() end)
     DXMShopping:RefreshAuction()
 end

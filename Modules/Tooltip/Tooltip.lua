@@ -43,8 +43,65 @@ local function getItemKey(tip, additional, link)
     return itemKey
 end
 
+local function addNativeLine(tip, left, right)
+    tip:AddDoubleLine(left, right, 0.25, 0.8, 1, 1, 1, 1)
+end
+
+local function displayNativeTooltip(tip, data)
+    if not tip or not data then return end
+    local link = data.hyperlink
+    if not link and tip.GetItem then
+        local _, itemLink = tip:GetItem()
+        link = itemLink
+    end
+    -- Bag and equipment tooltips can expose an ItemLocation through their
+    -- owner. Prefer that Auction House key because Classic item links carry
+    -- the raw random-property suffix while AH history uses its normalized
+    -- suffix identity.
+    local itemKey = getItemKey(tip, {}, link)
+    if not itemKey then return end
+    local key = DXMCore:ItemKeyKey(itemKey)
+    if not key then return end
+
+    local prices = DXMPriceSummary.Get(itemKey)
+    local function value(price)
+        return price and ("|cff20ff20" .. money(price) .. "|r") or "No data"
+    end
+    local age = ""
+    if prices.capturedAt then
+        local seconds = math.max(0, GetServerTime() - prices.capturedAt)
+        age = seconds < 60 and "just now" or seconds < 3600 and (math.floor(seconds / 60) .. "m ago")
+            or seconds < 86400 and (math.floor(seconds / 3600) .. "h ago") or (math.floor(seconds / 86400) .. "d ago")
+    end
+
+    addNativeLine(tip, "7-day average / unit", value(prices.average7))
+    addNativeLine(tip, "24-hour average / unit", value(prices.average24))
+    addNativeLine(tip, "Latest / unit" .. (age ~= "" and (" (" .. age .. ")") or ""), value(prices.latest))
+    if DXMSalvage and itemKey.itemID then
+        local canDisenchant = DXMSalvage.CanDisenchant and DXMSalvage.CanDisenchant(itemKey.itemID)
+        if canDisenchant then
+            local salvage, _, missing = DXMSalvage.Value(itemKey.itemID, true)
+            local salvageText = salvage and ("|cff20ff20" .. money(salvage) .. "|r")
+                or ("|cffaaaaaa" .. (missing or "No material price data") .. "|r")
+            addNativeLine(tip, "Salvager value / unit", salvageText)
+        end
+    end
+    if IsShiftKeyDown() then
+        if prices.excluded and prices.excluded > 0 then
+            tip:AddLine(("Excluded %d listings above 200%% of fair average"):format(prices.excluded), 0.25, 0.8, 1)
+        end
+        tip:AddLine(("Observed minimum prices: %d samples / 7d, %d / 24h"):format(prices.count7, prices.count24), 0.25, 0.8, 1)
+        tip:AddLine("Latest source: " .. (prices.source or "none"), 0.25, 0.8, 1)
+    end
+end
+
 function Module:DisplayTooltip(kind, tooltip, tip, ...)
     if DXMConfig and DXMConfig.showTooltips == false then return end
+    local mode, nativeData = ...
+    if kind == "item" and mode == "native" then
+        displayNativeTooltip(tip, nativeData)
+        return
+    end
     local link, quantity
     if kind == "item" then
         _, quantity, _, link = ...
@@ -78,8 +135,13 @@ function Module:DisplayTooltip(kind, tooltip, tip, ...)
     tooltip:AddLine("24-hour average / unit", value(prices.average24))
     tooltip:AddLine("Latest / unit" .. (age ~= "" and (" (" .. age .. ")") or ""), value(prices.latest))
     if DXMSalvage and itemKey.itemID then
-        local salvage = DXMSalvage.Value(itemKey.itemID)
-        if salvage then tooltip:AddLine("Salvage value", "|cff20ff20" .. money(salvage) .. "|r") end
+        local canDisenchant = DXMSalvage.CanDisenchant and DXMSalvage.CanDisenchant(itemKey.itemID)
+        if canDisenchant then
+            local salvage, _, missing = DXMSalvage.Value(itemKey.itemID, true)
+            local salvageText = salvage and ("|cff20ff20" .. money(salvage) .. "|r")
+                or ("|cffaaaaaa" .. (missing or "No material price data") .. "|r")
+            tooltip:AddLine("Salvager value / unit", salvageText)
+        end
     end
     if IsShiftKeyDown() then
         if prices.excluded and prices.excluded>0 then tooltip:AddLine(("Excluded %d listings above 200%% of fair average"):format(prices.excluded)) end

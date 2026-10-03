@@ -6,6 +6,7 @@ local refreshPending = false
 local disenchantPending = false
 local pendingGeneration = 0
 local lootFrameSuppressed = false
+local lootCollectionPending = false
 local status
 local sessionSummary
 local sessionDetail
@@ -199,14 +200,16 @@ end
 local frame = CreateFrame("Frame", "DXMDDQFrame", UIParent, "BasicFrameTemplateWithInset")
 frame:SetSize(390, 154)
 frame:SetClampedToScreen(true)
+frame.FocusGamepad=function() end
+frame.UnfocusGamepad=function() end
 frame:SetMovable(true)
 frame:EnableMouse(true)
 frame:RegisterForDrag("LeftButton")
 frame:SetScript("OnDragStart", function(self)
-    if not self.openedFromProfession then self:StartMoving() end
+    if not self.openedFromProfession and not self.openedFromMailbox then self:StartMoving() end
 end)
 frame:SetScript("OnDragStop", function(self)
-    if self.openedFromProfession then return end
+    if self.openedFromProfession or self.openedFromMailbox then return end
     self:StopMovingOrSizing()
     local point, _, relativePoint, x, y = self:GetPoint(1)
     DXMDDQDB.point, DXMDDQDB.relativePoint = point, relativePoint
@@ -214,9 +217,15 @@ frame:SetScript("OnDragStop", function(self)
 end)
 if frame.TitleText then frame.TitleText:SetText("DDQ") end
 
+local embeddedBackground = frame:CreateTexture(nil, "BACKGROUND", nil, 7)
+embeddedBackground:SetAllPoints(frame)
+embeddedBackground:SetColorTexture(.035, .043, .078, 1)
+embeddedBackground:Hide()
+
 local embeddedTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 embeddedTitle:SetPoint("TOPLEFT", 22, -18)
 embeddedTitle:SetText("DDQ - Defyler's Disenchant Queue")
+embeddedTitle:SetTextColor(.788, .643, .957)
 embeddedTitle:Hide()
 
 local icon = CreateFrame("Button", nil, frame)
@@ -315,7 +324,9 @@ local function refresh()
     if InCombatLockdown and InCombatLockdown() then
         refreshPending = true
         status:SetText("DDQ will refresh after combat.")
-        action:Disable()
+        -- The action is a protected SecureActionButton. Enabling or disabling
+        -- it during combat taints the click path and is blocked by the client.
+        -- Keep the last secure attributes intact until PLAYER_REGEN_ENABLED.
         return
     end
     if lootOpen then clearAction("Loot the enchanting materials to continue."); return end
@@ -326,6 +337,9 @@ end
 
 action:SetScript("PostClick", function()
     if currentCandidate then
+        if DXMDisenchantTracker and DXMDisenchantTracker.Prepare then
+            DXMDisenchantTracker.Prepare(currentCandidate.link or (currentCandidate.info and currentCandidate.info.itemID))
+        end
         disenchantPending = true
         pendingGeneration = pendingGeneration + 1
         local generation = pendingGeneration
@@ -333,9 +347,23 @@ action:SetScript("PostClick", function()
             if generation == pendingGeneration then disenchantPending = false end
         end)
         status:SetText("Disenchanting. The next item will load after your bags update.")
-        action:Disable()
+        -- Do not mutate the protected button while its secure click is still
+        -- being processed. BAG_UPDATE_DELAYED/LOOT_CLOSED refresh it safely.
     end
 end)
+
+local function setProfessionPortraitShown(professionFrame, shown)
+    if DXMHostStyle and DXMHostStyle.Set then
+        DXMHostStyle:Set(professionFrame, not shown)
+    elseif shown and ButtonFrameTemplate_ShowPortrait then
+        ButtonFrameTemplate_ShowPortrait(professionFrame)
+    elseif not shown and ButtonFrameTemplate_HidePortrait then
+        ButtonFrameTemplate_HidePortrait(professionFrame)
+    elseif professionFrame.PortraitContainer then
+        professionFrame.PortraitContainer:SetShown(shown)
+    end
+end
+
 
 frame:SetScript("OnShow", function()
     DXMDDQDB.shown = true
@@ -343,10 +371,22 @@ frame:SetScript("OnShow", function()
 end)
 frame:SetScript("OnHide", function()
     DXMDDQDB.shown = false
+    if frame.openedFromProfession then
+        local professionFrame = frame:GetParent()
+        if professionFrame then setProfessionPortraitShown(professionFrame, true) end
+    end
+    if frame.openedFromMailbox and DXMHostStyle and DXMHostStyle.Set then
+        local mailFrame = frame:GetParent()
+        DXMHostStyle:Set(mailFrame, false)
+    end
     if _G.DXMDDQProfessionTab and PanelTemplates_DeselectTab then
         PanelTemplates_DeselectTab(_G.DXMDDQProfessionTab)
     end
+    if _G.MailFrameTab3 and PanelTemplates_DeselectTab then
+        PanelTemplates_DeselectTab(_G.MailFrameTab3)
+    end
     frame.openedFromProfession = false
+    frame.openedFromMailbox = false
 end)
 
 local ENCHANTING_SKILL_LINE_ID = 333
@@ -436,12 +476,15 @@ local function placeStandalone()
     restoreDefylerGeometry()
     frame:SetParent(UIParent)
     frame.openedFromProfession = false
+    frame.openedFromMailbox = false
     frame:SetMovable(true)
+    frame:SetClampedToScreen(true)
     frame:SetSize(390, 154)
     frame:SetFrameStrata("DIALOG")
     frame:ClearAllPoints()
     frame:SetPoint(DXMDDQDB.point or "CENTER", UIParent, DXMDDQDB.relativePoint or "CENTER", tonumber(DXMDDQDB.x) or 0, tonumber(DXMDDQDB.y) or 0)
     setOuterChromeShown(true)
+    embeddedBackground:Hide()
     embeddedTitle:Hide()
     sessionPanel:Hide()
     if frame.DefylerUIResizeGrip then frame.DefylerUIResizeGrip:Show() end
@@ -466,13 +509,16 @@ local function placeInProfessions(professionsFrame)
     suspendDefylerGeometry()
     frame:SetParent(professionsFrame)
     frame.openedFromProfession = true
+    frame.openedFromMailbox = false
     frame:SetMovable(false)
     frame:SetScale(1)
     frame:ClearAllPoints()
     frame:SetPoint("TOPLEFT", professionsFrame, "TOPLEFT", 3, -21)
     frame:SetPoint("BOTTOMRIGHT", professionsFrame, "BOTTOMRIGHT", -3, 3)
     setEmbeddedLayer(frame, professionsFrame)
+    setProfessionPortraitShown(professionsFrame, false)
     setOuterChromeShown(false)
+    embeddedBackground:Show()
     embeddedTitle:ClearAllPoints()
     embeddedTitle:SetPoint("TOPLEFT", frame, "TOPLEFT", 30, -48)
     embeddedTitle:Show()
@@ -487,6 +533,105 @@ local function placeInProfessions(professionsFrame)
     icon:SetPoint("TOPLEFT", 30, -88)
     action:ClearAllPoints()
     action:SetPoint("TOPLEFT", frame, "TOPLEFT", 30, -178)
+end
+
+local mailTab
+
+local function setMailboxLayer(mailFrame)
+    local strata=mailFrame:GetFrameStrata() or "MEDIUM"
+    local pageLevel=mailFrame:GetFrameLevel()+1
+    frame:SetFrameStrata(strata)
+    frame:SetFrameLevel(pageLevel)
+    for _,key in ipairs({"NineSlice","TitleContainer","PortraitContainer","CloseButton"}) do
+        local region=mailFrame[key]
+        if region and region.SetFrameStrata then region:SetFrameStrata(strata) end
+        if region and region.SetFrameLevel then region:SetFrameLevel(pageLevel+20) end
+    end
+    if mailTab then mailTab:SetFrameLevel(pageLevel+21) end
+end
+
+local function placeInMailbox(mailFrame)
+    suspendDefylerGeometry()
+    frame:SetParent(mailFrame)
+    frame.openedFromProfession=false
+    frame.openedFromMailbox=true
+    frame:SetMovable(false)
+    frame:SetScale(1)
+    frame:SetClampedToScreen(false)
+    frame:ClearAllPoints()
+    frame:SetPoint("TOPLEFT",mailFrame,"TOPLEFT",3,-21)
+    frame:SetPoint("BOTTOMRIGHT",mailFrame,"BOTTOMRIGHT",-3,3)
+    setMailboxLayer(mailFrame)
+    if DXMHostStyle and DXMHostStyle.Set then DXMHostStyle:Set(mailFrame, true) end
+    setOuterChromeShown(false)
+    embeddedBackground:Show()
+    embeddedTitle:ClearAllPoints()
+    embeddedTitle:SetPoint("TOPLEFT",frame,"TOPLEFT",24,-48)
+    embeddedTitle:Show()
+    sessionPanel:Show()
+    if frame.DefylerUIResizeGrip then frame.DefylerUIResizeGrip:Hide() end
+    if frame.DefylerUITitleHandle then frame.DefylerUITitleHandle:Hide() end
+    if frame.InsetBg then
+        frame.InsetBg:ClearAllPoints()
+        frame.InsetBg:SetAllPoints(frame)
+    end
+    icon:ClearAllPoints()
+    icon:SetPoint("TOPLEFT",24,-88)
+    action:ClearAllPoints()
+    action:SetPoint("TOPLEFT",frame,"TOPLEFT",24,-178)
+end
+
+local function updateMailTab()
+    if not mailTab then return end
+    local enabled=hasEnchantingProfession()
+    mailTab:SetEnabled(enabled)
+    mailTab:SetAlpha(enabled and 1 or .45)
+    if not enabled and frame.openedFromMailbox then frame:Hide() end
+end
+
+local function ensureMailTab()
+    local mailFrame=_G.MailFrame
+    if mailTab or not mailFrame or not _G.MailFrameTab2 then return end
+    if DXMHostStyle and DXMHostStyle.RestorePortrait then DXMHostStyle:RestorePortrait(mailFrame) end
+    mailTab=CreateFrame("Button","MailFrameTab3",mailFrame,"FriendsFrameTabTemplate")
+    mailTab:SetID(3)
+    mailTab:SetText("DDQ")
+    mailTab:SetPoint("LEFT",_G.MailFrameTab2,"RIGHT",-8,0)
+    if PanelTemplates_TabResize then PanelTemplates_TabResize(mailTab,0) end
+    PanelTemplates_SetNumTabs(mailFrame,3)
+    mailTab:SetScript("OnClick",function()
+        if not hasEnchantingProfession() then return end
+        PanelTemplates_SetTab(mailFrame,3)
+        if mailFrame.activeSubFrame and mailFrame.activeSubFrame~=frame then mailFrame.activeSubFrame:Hide() end
+        mailFrame.activeSubFrame=frame
+        if SetSendMailShowing then SetSendMailShowing(false) end
+        if ButtonFrameTemplate_HideButtonBar then ButtonFrameTemplate_HideButtonBar(mailFrame) end
+        mailFrame:SetTitle("DDQ - Defyler's Disenchant Queue")
+        placeInMailbox(mailFrame)
+        frame:Show()
+        if frame.Raise then frame:Raise() end
+    end)
+    mailTab:SetScript("OnEnter",function(self)
+        GameTooltip:SetOwner(self,"ANCHOR_TOP")
+        GameTooltip:SetText("DDQ - Defyler's Disenchant Queue",1,.82,0)
+        GameTooltip:AddLine(hasEnchantingProfession() and "Disenchant the next eligible item in your bags." or "Requires the Enchanting profession.",1,1,1,true)
+        GameTooltip:Show()
+    end)
+    mailTab:SetScript("OnLeave",function() GameTooltip:Hide() end)
+    hooksecurefunc("MailFrameTab_OnClick",function(_,tabID)
+        if tabID~=3 and frame.openedFromMailbox then frame:Hide() end
+    end)
+    mailFrame:HookScript("OnHide",function()
+        if frame.openedFromMailbox then frame:Hide() end
+    end)
+    mailFrame:HookScript("OnShow",function()
+        C_Timer.After(0,function()
+            if not frame.openedFromMailbox and DXMHostStyle and DXMHostStyle.RestorePortrait then
+                DXMHostStyle:RestorePortrait(mailFrame)
+            end
+        end)
+    end)
+    updateMailTab()
 end
 
 local function updateProfessionTab()
@@ -569,7 +714,7 @@ local function ensureProfessionTab()
 end
 
 local events = CreateFrame("Frame")
-for _, event in ipairs({"PLAYER_LOGIN", "ADDON_LOADED", "TRADE_SKILL_SHOW", "SKILL_LINES_CHANGED", "SPELLS_CHANGED", "BAG_UPDATE_DELAYED", "GET_ITEM_INFO_RECEIVED", "PLAYER_REGEN_ENABLED", "LOOT_OPENED", "LOOT_CLOSED", "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_INTERRUPTED"}) do
+for _, event in ipairs({"PLAYER_LOGIN", "ADDON_LOADED", "MAIL_SHOW", "TRADE_SKILL_SHOW", "SKILL_LINES_CHANGED", "SPELLS_CHANGED", "BAG_UPDATE_DELAYED", "GET_ITEM_INFO_RECEIVED", "PLAYER_REGEN_ENABLED", "LOOT_OPENED", "LOOT_CLOSED", "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_INTERRUPTED"}) do
     events:RegisterEvent(event)
 end
 events:SetScript("OnEvent", function(_, event, unit, _, spellID)
@@ -577,24 +722,40 @@ events:SetScript("OnEvent", function(_, event, unit, _, spellID)
         placeStandalone()
         frame:Hide()
         C_Timer.After(0, ensureProfessionTab)
+        C_Timer.After(0, ensureMailTab)
         refresh()
     elseif event == "ADDON_LOADED" then
         if unit == "Blizzard_Professions" then C_Timer.After(0, ensureProfessionTab) end
+        if unit == "Blizzard_MailUI" then C_Timer.After(0, ensureMailTab) end
+    elseif event == "MAIL_SHOW" then
+        C_Timer.After(0,function() ensureMailTab();updateMailTab() end)
     elseif event == "TRADE_SKILL_SHOW" or event == "SKILL_LINES_CHANGED" or event == "SPELLS_CHANGED" then
         C_Timer.After(0, function()
             ensureProfessionTab()
             updateProfessionTab()
+            ensureMailTab()
+            updateMailTab()
             refresh()
         end)
     elseif event == "LOOT_OPENED" then
         lootOpen = true
-        if collectDisenchantLoot() then
-            status:SetText("Collecting disenchant materials...")
-        else
-            refresh()
+        -- Let the core tracker read the loot after the safe PostClick handoff
+        -- before DDQ removes those slots from the loot window.
+        if not lootCollectionPending then
+            lootCollectionPending = true
+            C_Timer.After(.05, function()
+                lootCollectionPending = false
+                if not lootOpen then return end
+                if collectDisenchantLoot() then
+                    status:SetText("Collecting disenchant materials...")
+                else
+                    refresh()
+                end
+            end)
         end
     elseif event == "LOOT_CLOSED" then
         lootOpen = false
+        lootCollectionPending = false
         restoreLootFrame()
         C_Timer.After(0, refresh)
     elseif event == "PLAYER_REGEN_ENABLED" then

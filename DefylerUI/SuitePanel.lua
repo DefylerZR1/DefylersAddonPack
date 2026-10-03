@@ -4,6 +4,12 @@ local windowControls
 local damageMeter
 local scaleSlider
 local scaleValue
+local moduleRows = {}
+local RefreshModuleRows
+
+local GOLD = {1, .82, .2}
+local VIOLET = {.78, .64, .96}
+local MUTED = {.56, .58, .64}
 
 local function TakePanelPositionOwnership(frame)
     if frame.SetUserPlaced then frame:SetUserPlaced(false) end
@@ -15,23 +21,15 @@ local function SavePanelPosition(frame)
     local scale = frame:GetEffectiveScale()
     if not left or not top or not scale or scale <= 0 then return end
     DefylerUIDB = type(DefylerUIDB) == "table" and DefylerUIDB or {}
-    DefylerUIDB.suitePanelPosition = {
-        left = left * scale,
-        top = top * scale,
-    }
+    DefylerUIDB.suitePanelPosition = {left = left * scale, top = top * scale}
     if DefylerUI_SaveSuiteSettings then DefylerUI_SaveSuiteSettings() end
 end
 
 local function RestorePanelPosition(frame)
     local position = type(DefylerUIDB) == "table" and DefylerUIDB.suitePanelPosition
     local scale = frame:GetEffectiveScale()
-    if type(position) ~= "table"
-        or type(position.left) ~= "number"
-        or type(position.top) ~= "number"
-        or not scale
-        or scale <= 0 then
-        return
-    end
+    if type(position) ~= "table" or type(position.left) ~= "number" or type(position.top) ~= "number"
+        or not scale or scale <= 0 then return end
     TakePanelPositionOwnership(frame)
     frame:ClearAllPoints()
     frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", position.left / scale, position.top / scale)
@@ -46,7 +44,7 @@ end
 
 local function AddButton(parent, text, width, click)
     local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    button:SetSize(width or 150, 26)
+    button:SetSize(width or 92, 24)
     button:SetText(text)
     button:SetScript("OnClick", click)
     return button
@@ -58,29 +56,39 @@ local function Loaded(name)
     return false
 end
 
+local function AddOnVersion(name)
+    local getter = C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata
+    return getter and getter(name, "Version") or nil
+end
+
 local function SetStatus(message, errorState)
     if not statusText then return end
     statusText:SetText(message or "")
-    statusText:SetTextColor(errorState and 1 or .72, errorState and .35 or .82, errorState and .28 or .92)
+    statusText:SetTextColor(errorState and 1 or .70, errorState and .35 or .76, errorState and .28 or .86)
+end
+
+local function CloseAndRun(callback)
+    panel:Hide()
+    callback()
+end
+
+local function OpenDXMPage(pageKey, label)
+    if not (DXMExchange and DXMExchange.Open) then
+        SetStatus((label or "DXM") .. " is not loaded.", true)
+        return
+    end
+    if not (AuctionHouseFrame and AuctionHouseFrame:IsShown()) then
+        SetStatus("Open the Auction House first, then open " .. (label or "DXM") .. ".", true)
+        return
+    end
+    CloseAndRun(function() DXMExchange:Open(pageKey) end)
 end
 
 local function OpenForeverSettings()
     if SlashCmdList and SlashCmdList.FOREVERSETTINGS then
-        panel:Hide()
-        SlashCmdList.FOREVERSETTINGS("")
+        CloseAndRun(function() SlashCmdList.FOREVERSETTINGS("") end)
     else
         SetStatus("Forever Settings is not loaded.", true)
-    end
-end
-
-local function OpenDXMSettings()
-    if not (DXMExchange and DXMExchange.Open) then
-        SetStatus("DXM is not loaded.", true)
-    elseif not (AuctionHouseFrame and AuctionHouseFrame:IsShown()) then
-        SetStatus("Open the Auction House first, then use DXM Configuration.", true)
-    else
-        panel:Hide()
-        DXMExchange:Open("config")
     end
 end
 
@@ -93,39 +101,105 @@ local function OpenDamageMeterSettings()
             SetStatus(message or "Damage Meter options are unavailable.", true)
         end
     elseif SlashCmdList and SlashCmdList.DEFYLERDAMAGEMETER then
-        panel:Hide()
-        SlashCmdList.DEFYLERDAMAGEMETER("options")
+        CloseAndRun(function() SlashCmdList.DEFYLERDAMAGEMETER("options") end)
     else
         SetStatus("Defyler Damage Meter is not loaded.", true)
     end
 end
 
+local function OpenDDQ()
+    if DXMDDQ and DXMDDQ.Show then
+        CloseAndRun(DXMDDQ.Show)
+    elseif SlashCmdList and SlashCmdList.DXMDDQ then
+        CloseAndRun(function() SlashCmdList.DXMDDQ("") end)
+    else
+        SetStatus("Defyler's Disenchant Queue is not loaded.", true)
+    end
+end
+
+local function ToggleDQA()
+    if not (SlashCmdList and SlashCmdList.DQA) then
+        SetStatus("Defyler's Quest Assistance is not loaded.", true)
+        return
+    end
+    DQADB = type(DQADB) == "table" and DQADB or {}
+    SlashCmdList.DQA(DQADB.enabled == false and "on" or "off")
+    SetStatus("Quest Assistance " .. (DQADB.enabled == false and "disabled." or "enabled."))
+    RefreshModuleRows()
+end
+
+local MODULES = {
+    {addon = "DefylerUI", name = "Defyler UI", action = "Current", current = true},
+    {addon = "DefylerDamageMeter", name = "Damage Meter", action = "Settings", open = OpenDamageMeterSettings},
+    {addon = "DXM", name = "DXM Exchange", action = "Settings", open = function() OpenDXMPage("config", "DXM settings") end},
+    {addon = "DXM_DDQ", name = "Disenchant Queue", action = "Open", open = OpenDDQ},
+    {addon = "DXM_DQA", name = "Quest Assistance", action = "Toggle", open = ToggleDQA},
+    {addon = "DXM_DealFinder", name = "Deal Finder", action = "Open", open = function() OpenDXMPage("deals", "Deal Finder") end},
+    {addon = "DXM_Stats_OverTime", name = "Market History", action = "Open", open = function() OpenDXMPage("valuation", "Market History") end},
+    {addon = "DXM_SharedData", name = "DXM Network", action = "Open", open = function() OpenDXMPage("network", "DXM Network") end},
+    {addon = "DXM_Valuer", name = "DXM Valuer", action = "Open", open = function() OpenDXMPage("valuation", "DXM Valuer") end},
+    {addon = "ForeverSettings", name = "Forever Controls", action = "Settings", open = OpenForeverSettings},
+}
+
+RefreshModuleRows = function()
+    for _, row in ipairs(moduleRows) do
+        local definition = row.Definition
+        local isLoaded = Loaded(definition.addon)
+        local version = AddOnVersion(definition.addon)
+        local state = isLoaded and "Loaded" or "Unavailable"
+        if definition.addon == "DXM_DQA" and isLoaded and type(DQADB) == "table" then
+            state = DQADB.enabled == false and "Off" or "On"
+            row.Action:SetText(DQADB.enabled == false and "Enable" or "Disable")
+        else
+            row.Action:SetText(definition.action)
+        end
+        row.State:SetText((version and ("v" .. version .. "  ") or "") .. state)
+        row.State:SetTextColor(isLoaded and .45 or .65, isLoaded and .82 or .36, isLoaded and .56 or .36)
+        row.Action:SetEnabled(isLoaded and not definition.current and definition.open ~= nil)
+    end
+end
+
+local function CreateModuleRow(parent, definition, index)
+    local row = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    row:SetSize(296, 38)
+    row:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1})
+    row:SetBackdropColor(.055, .06, .09, .96)
+    row:SetBackdropBorderColor(.22, .17, .28, 1)
+    local column = (index - 1) % 2
+    local line = math.floor((index - 1) / 2)
+    row:SetPoint("TOPLEFT", 14 + column * 304, -24 - line * 42)
+    local name = AddText(row, "GameFontNormal", definition.name)
+    name:SetPoint("TOPLEFT", 10, -7)
+    name:SetTextColor(unpack(GOLD))
+    local state = AddText(row, "GameFontDisableSmall", "")
+    state:SetPoint("TOPLEFT", name, "BOTTOMLEFT", 0, -2)
+    state:SetWidth(190)
+    local button = AddButton(row, definition.action, 78, definition.open or function() end)
+    button:SetPoint("RIGHT", -7, 0)
+    row.Definition = definition
+    row.State = state
+    row.Action = button
+    moduleRows[#moduleRows + 1] = row
+end
+
 local function Refresh()
     if not panel then return end
-    panel:SetScale(1 / UIParent:GetEffectiveScale())
+    panel:SetScale(1)
     RestorePanelPosition(panel)
-    if DefylerUI_AreWindowControlsEnabled then
-        windowControls:SetChecked(DefylerUI_AreWindowControlsEnabled())
-    end
-
+    if DefylerUI_AreWindowControlsEnabled then windowControls:SetChecked(DefylerUI_AreWindowControlsEnabled()) end
     local damageLoaded = Loaded("DefylerDamageMeter") and type(DDM_IsEnabled) == "function"
     damageMeter:SetEnabled(damageLoaded)
     damageMeter.Text:SetTextColor(damageLoaded and 1 or .5, damageLoaded and .82 or .5, damageLoaded and .2 or .5)
     damageMeter:SetChecked(damageLoaded and DDM_IsEnabled() or false)
-
     local scale = DefylerUI_GetGlobalScale and DefylerUI_GetGlobalScale() or UIParent:GetScale()
     scaleSlider:SetValue(scale)
     scaleValue:SetText(string.format("%.2f", scale))
-
-    local foreverState = Loaded("ForeverSettings") and "|cff40ff40Loaded|r" or "|cffff5050Unavailable|r"
-    local dxmState = Loaded("DXM") and "|cff40ff40Loaded|r" or "|cffff5050Unavailable|r"
-    local ddmState = damageLoaded and (DDM_IsEnabled() and "|cff40ff40On|r" or "|cffffd100Off|r") or "|cffff5050Unavailable|r"
-    SetStatus("Forever Settings: " .. foreverState .. "     DXM: " .. dxmState .. "     Damage Meter: " .. ddmState)
+    RefreshModuleRows()
 end
 
 local function CreatePanel()
     panel = CreateFrame("Frame", "DefylerUISuitePanel", UIParent, "BackdropTemplate")
-    panel:SetSize(570, 500)
+    panel:SetSize(640, 410)
     panel:SetPoint("CENTER")
     panel:SetFrameStrata("DIALOG")
     panel:SetClampedToScreen(true)
@@ -133,134 +207,89 @@ local function CreatePanel()
     panel:SetMovable(true)
     TakePanelPositionOwnership(panel)
     panel:RegisterForDrag("LeftButton")
-    panel:SetScript("OnDragStart", function(self)
-        self:StartMoving()
-        TakePanelPositionOwnership(self)
-    end)
-    panel:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        TakePanelPositionOwnership(self)
-        SavePanelPosition(self)
-    end)
-    panel:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
-        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile = true, tileSize = 32, edgeSize = 32,
-        insets = {left = 10, right = 10, top = 10, bottom = 10},
-    })
-    panel:SetBackdropColor(.025, .035, .055, .99)
-    panel:SetBackdropBorderColor(.72, .50, .24, 1)
+    panel:SetScript("OnDragStart", function(self) self:StartMoving(); TakePanelPositionOwnership(self) end)
+    panel:SetScript("OnDragStop", function(self) self:StopMovingOrSizing(); TakePanelPositionOwnership(self); SavePanelPosition(self) end)
+    panel:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 2,
+        insets = {left = 1, right = 1, top = 1, bottom = 1}})
+    panel:SetBackdropColor(.025, .03, .05, .99)
+    panel:SetBackdropBorderColor(unpack(VIOLET))
 
-    -- Keep the controls readable even if a client build cannot resolve the backdrop texture.
-    local backing = panel:CreateTexture(nil, "BACKGROUND")
-    backing:SetPoint("TOPLEFT", 11, -11)
-    backing:SetPoint("BOTTOMRIGHT", -11, 11)
-    backing:SetColorTexture(.018, .024, .035, .97)
+    local header = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    header:SetPoint("TOPLEFT", 2, -2); header:SetPoint("TOPRIGHT", -2, -2); header:SetHeight(38)
+    header:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8X8"})
+    header:SetBackdropColor(.045, .05, .085, 1)
+    local title = AddText(header, "GameFontNormalLarge", "Defyler Suite")
+    title:SetPoint("LEFT", 14, 0); title:SetTextColor(unpack(VIOLET))
+    local subtitle = AddText(header, "GameFontDisableSmall", "Controls and module settings")
+    subtitle:SetPoint("LEFT", title, "RIGHT", 12, -1)
+    local close = CreateFrame("Button", nil, header, "UIPanelCloseButton")
+    close:SetPoint("RIGHT", -2, 0)
 
-    local title = AddText(panel, "GameFontNormalLarge", "Defyler Suite Control")
-    title:SetPoint("TOPLEFT", 24, -20)
-    local subtitle = AddText(panel, "GameFontHighlightSmall", "One place for interface, graphics, market, and combat tools.")
-    subtitle:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -7)
+    local quick = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    quick:SetPoint("TOPLEFT", 12, -50); quick:SetPoint("TOPRIGHT", -12, -50); quick:SetHeight(76)
+    quick:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1})
+    quick:SetBackdropColor(.04, .045, .07, .95); quick:SetBackdropBorderColor(.22, .17, .28, 1)
 
-    local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", -5, -5)
-
-    local divider = panel:CreateTexture(nil, "ARTWORK")
-    divider:SetColorTexture(.82, .45, .12, .75)
-    divider:SetPoint("TOPLEFT", 20, -70)
-    divider:SetPoint("TOPRIGHT", -20, -70)
-    divider:SetHeight(1)
-
-    local controlsTitle = AddText(panel, "GameFontNormal", "DUI CONTROLS")
-    controlsTitle:SetPoint("TOPLEFT", 26, -88)
-
-    windowControls = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-    windowControls:SetPoint("TOPLEFT", 24, -112)
-    windowControls.Text:SetText("Show window move and resize controls")
-    windowControls.Text:SetTextColor(1, .82, .2)
+    windowControls = CreateFrame("CheckButton", nil, quick, "UICheckButtonTemplate")
+    windowControls:SetPoint("TOPLEFT", 8, -5)
+    windowControls.Text:SetText("Window controls")
+    windowControls.Text:SetTextColor(unpack(GOLD))
     windowControls:SetScript("OnClick", function(self)
         if DefylerUI_SetWindowControlsEnabled then
             DefylerUI_SetWindowControlsEnabled(self:GetChecked() and true or false)
-            SetStatus("DUI window controls " .. (self:GetChecked() and "enabled." or "hidden."))
+            SetStatus("Window controls " .. (self:GetChecked() and "shown." or "hidden."))
         end
     end)
 
-    damageMeter = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-    damageMeter:SetPoint("TOPLEFT", windowControls, "BOTTOMLEFT", 0, -8)
-    damageMeter.Text:SetText("Enable Defyler Damage Meter")
-    damageMeter.Text:SetTextColor(1, .82, .2)
+    damageMeter = CreateFrame("CheckButton", nil, quick, "UICheckButtonTemplate")
+    damageMeter:SetPoint("TOPLEFT", 300, -5)
+    damageMeter.Text:SetText("Damage Meter")
+    damageMeter.Text:SetTextColor(unpack(GOLD))
     damageMeter:SetScript("OnClick", function(self)
         if not DDM_SetEnabled then self:SetChecked(false); SetStatus("Defyler Damage Meter is not loaded.", true); return end
         local success, message = DDM_SetEnabled(self:GetChecked() and true or false)
-        if success == false then self:SetChecked(not self:GetChecked()); SetStatus(message or "Unable to change the damage meter.", true)
-        else SetStatus("Defyler Damage Meter " .. (self:GetChecked() and "enabled." or "disabled.")) end
+        if success == false then
+            self:SetChecked(not self:GetChecked()); SetStatus(message or "Unable to change the Damage Meter.", true)
+        else
+            SetStatus("Damage Meter " .. (self:GetChecked() and "enabled." or "disabled."))
+        end
         Refresh()
     end)
 
-    local scaleTitle = AddText(panel, "GameFontNormal", "GLOBAL UI SCALE")
-    scaleTitle:SetPoint("TOPLEFT", 26, -190)
-    scaleSlider = CreateFrame("Slider", "DefylerUISuiteScaleSlider", panel, "OptionsSliderTemplate")
-    scaleSlider:SetPoint("TOPLEFT", 38, -226)
-    scaleSlider:SetSize(350, 20)
-    scaleSlider:SetMinMaxValues(.25, 1.50)
-    scaleSlider:SetValueStep(.01)
-    scaleSlider:SetObeyStepOnDrag(true)
-    scaleSlider.Low:SetText("0.25")
-    scaleSlider.High:SetText("1.50")
-    scaleSlider.Text:SetText("")
-    scaleValue = AddText(panel, "GameFontHighlight", "1.00")
-    scaleValue:SetPoint("LEFT", scaleSlider, "RIGHT", 24, 0)
-    scaleValue:SetWidth(45)
+    local scaleLabel = AddText(quick, "GameFontHighlightSmall", "UI scale")
+    scaleLabel:SetPoint("BOTTOMLEFT", 12, 13)
+    scaleSlider = CreateFrame("Slider", "DefylerUISuiteScaleSlider", quick, "OptionsSliderTemplate")
+    scaleSlider:SetPoint("LEFT", scaleLabel, "RIGHT", 15, 0)
+    scaleSlider:SetSize(280, 16)
+    scaleSlider:SetMinMaxValues(.25, 1.50); scaleSlider:SetValueStep(.01); scaleSlider:SetObeyStepOnDrag(true)
+    scaleSlider.Low:SetText(""); scaleSlider.High:SetText(""); scaleSlider.Text:SetText("")
+    scaleValue = AddText(quick, "GameFontHighlightSmall", "1.00")
+    scaleValue:SetPoint("LEFT", scaleSlider, "RIGHT", 10, 0); scaleValue:SetWidth(36)
     scaleSlider:SetScript("OnValueChanged", function(_, value) scaleValue:SetText(string.format("%.2f", value)) end)
-
-    local applyScale = AddButton(panel, "Apply Scale", 105, function()
-        if DefylerUI_SetGlobalScale then
-            DefylerUI_SetGlobalScale(math.floor(scaleSlider:GetValue() * 100 + .5) / 100)
-            Refresh()
-        end
+    local applyScale = AddButton(quick, "Apply", 66, function()
+        if DefylerUI_SetGlobalScale then DefylerUI_SetGlobalScale(math.floor(scaleSlider:GetValue() * 100 + .5) / 100); Refresh() end
     end)
-    applyScale:SetPoint("TOPRIGHT", -24, -214)
-    local resetScale = AddButton(panel, "Reset Scale", 105, function()
+    applyScale:SetPoint("LEFT", scaleValue, "RIGHT", 4, 0)
+    local resetScale = AddButton(quick, "Reset", 66, function()
         if DefylerUI_ResetGlobalScale then DefylerUI_ResetGlobalScale() end
     end)
-    resetScale:SetPoint("TOP", applyScale, "BOTTOM", 0, -8)
+    resetScale:SetPoint("LEFT", applyScale, "RIGHT", 5, 0)
 
-    local suiteTitle = AddText(panel, "GameFontNormal", "ADDON SETTINGS")
-    suiteTitle:SetPoint("TOPLEFT", 26, -292)
+    local moduleBox = CreateFrame("Frame", nil, panel)
+    moduleBox:SetPoint("TOPLEFT", 0, -134); moduleBox:SetPoint("TOPRIGHT", 0, -134); moduleBox:SetHeight(255)
+    local moduleTitle = AddText(moduleBox, "GameFontNormalSmall", "MODULES")
+    moduleTitle:SetPoint("TOPLEFT", 16, 0); moduleTitle:SetTextColor(unpack(MUTED))
+    for index, definition in ipairs(MODULES) do CreateModuleRow(moduleBox, definition, index) end
 
-    local forever = AddButton(panel, "Forever Controls", 158, OpenForeverSettings)
-    forever:SetPoint("TOPLEFT", 26, -322)
-    local dxm = AddButton(panel, "DXM Configuration", 158, OpenDXMSettings)
-    dxm:SetPoint("LEFT", forever, "RIGHT", 20, 0)
-    local ddm = AddButton(panel, "Damage Meter Options", 158, OpenDamageMeterSettings)
-    ddm:SetPoint("LEFT", dxm, "RIGHT", 20, 0)
-
-    local foreverNote = AddText(panel, "GameFontDisableSmall", "Extended graphics and world controls")
-    foreverNote:SetPoint("TOP", forever, "BOTTOM", 0, -7)
-    foreverNote:SetWidth(160)
-    foreverNote:SetJustifyH("CENTER")
-    local dxmNote = AddText(panel, "GameFontDisableSmall", "Available while the Auction House is open")
-    dxmNote:SetPoint("TOP", dxm, "BOTTOM", 0, -7)
-    dxmNote:SetWidth(160)
-    dxmNote:SetJustifyH("CENTER")
-    local ddmNote = AddText(panel, "GameFontDisableSmall", "Appearance, percentages, and reset controls")
-    ddmNote:SetPoint("TOP", ddm, "BOTTOM", 0, -7)
-    ddmNote:SetWidth(160)
-    ddmNote:SetJustifyH("CENTER")
-
-    local resetWindows = AddButton(panel, "Reset Window Positions", 175, function()
+    local resetWindows = AddButton(panel, "Reset window positions", 154, function()
         if DefylerUI_ResetWindowPositions then DefylerUI_ResetWindowPositions() end
     end)
-    resetWindows:SetPoint("BOTTOMLEFT", 24, 48)
-
-    statusText = AddText(panel, "GameFontHighlightSmall", "")
-    statusText:SetPoint("BOTTOMLEFT", 24, 18)
-    statusText:SetPoint("BOTTOMRIGHT", -24, 18)
+    resetWindows:SetPoint("BOTTOMLEFT", 14, 12)
+    statusText = AddText(panel, "GameFontDisableSmall", "")
+    statusText:SetPoint("LEFT", resetWindows, "RIGHT", 12, 0); statusText:SetPoint("RIGHT", -14, 0)
     statusText:SetJustifyH("LEFT")
 
-    panel:SetScript("OnShow", function()
-        Refresh()
-    end)
+    panel:SetScript("OnShow", Refresh)
     panel:Hide()
     UISpecialFrames[#UISpecialFrames + 1] = "DefylerUISuitePanel"
 end

@@ -3,7 +3,7 @@
 ## IconTexture: Interface\Icons\INV_Misc_Gear_01
 ## Notes: DUI controls for moving, resizing, and managing major interface windows.
 ## Author: DefylerZR1
-## Version: 0.4.13
+## Version: 0.4.19
 ## SavedVariables: DefylerUIDB, DefylerSuiteDB
 
 GlobalScale.lua

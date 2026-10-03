@@ -15,6 +15,10 @@ local THROTTLE_POLL_DELAY = 0.05
 local ITEM_INFO_RETRY_DELAY = 0.05
 local PREFETCH_COUNT = 250
 local PROGRESS_UPDATE_INTERVAL = 250
+local BROWSE_SCAN_TIMEOUT = 90
+local PAGE_RESPONSE_TIMEOUT = 3
+local LOCAL_PROCESS_BATCH = 200
+local LOCAL_PROCESS_BUDGET_MS = 4
 
 -- Only one continuation may request the next browse-result page for a scan.
 -- AUCTION_HOUSE_BROWSE_RESULTS_ADDED can arrive before an older timer fires;
@@ -92,8 +96,39 @@ end
 --   Trigger a statistic update when the results are processed.
 
 DXMScanner = DXMScanner or {}
+DXMConfig = DXMConfig or {}
+if DXMConfig.scanQualityFilterVersion ~= 2 then
+	DXMConfig.scanExcludePoor = true
+	DXMConfig.scanExcludeCommon = true
+	DXMConfig.scanQualityFilterVersion = 2
+end
+
+-- Apply the master quality filter before scanned rows reach statistics,
+-- valuation, or export modules. White Trade Goods remain available because
+-- Salvager and Crafting need current prices for their materials and reagents.
+function DXMScanner.ItemIsCraftingReagent(itemKey, itemInfo)
+	local itemID = itemKey and tonumber(itemKey.itemID)
+	local getter = C_Item and C_Item.GetItemInfoInstant or GetItemInfoInstant
+	local classID
+	if itemID and getter then
+		local _, _, _, _, _, resolvedClassID = getter(itemID)
+		classID = tonumber(resolvedClassID)
+	end
+	local tradeGoodsClass = Enum and Enum.ItemClass and Enum.ItemClass.Tradegoods or 7
+	return classID == tradeGoodsClass
+end
+
+function DXMScanner.ItemPassesMasterFilter(itemKey, itemInfo)
+	local quality = itemInfo and tonumber(itemInfo.quality)
+	if quality == 0 and DXMConfig.scanExcludePoor ~= false then return false end
+	if quality == 1 and DXMConfig.scanExcludeCommon == true then
+		return DXMScanner.ItemIsCraftingReagent(itemKey, itemInfo)
+	end
+	return true
+end
+
 -- Session-only tombstones: a confirmed auction ID must never be offered again.
-local purchasedAuctions, purchaseKeys, quotedKeys = {}, {}, {}
+local purchasedAuctions, purchaseKeys, quotedAuctions = {}, {}, {}
 function DXMScanner.IsPurchasedAuction(auctionID)
     return purchasedAuctions[auctionID] == true
 end
@@ -106,7 +141,13 @@ local function hookPurchaseIdentity()
     purchaseHooked=true
     hooksecurefunc(AuctionHouseFrame,"StartItemBuyout",function(_,auctionID)
         local info=C_AuctionHouse.GetAuctionInfoByID(auctionID)
-        if info and info.itemKey then quotedKeys[auctionID]=info.itemKey end
+        if info and info.itemKey then
+            quotedAuctions[auctionID]={
+                itemKey=info.itemKey,
+                buyoutAmount=tonumber(info.buyoutAmount) or 0,
+                quantity=math.max(1,tonumber(info.quantity) or 1),
+            }
+        end
     end)
 end
 local purchaseEvents=CreateFrame("Frame")
@@ -115,10 +156,13 @@ purchaseEvents:SetScript("OnEvent",function(_,_,auctionID)
     if not auctionID or purchasedAuctions[auctionID] then return end
     purchasedAuctions[auctionID]=true
     local info=C_AuctionHouse.GetAuctionInfoByID(auctionID)
-    local key=quotedKeys[auctionID] or (info and info.itemKey)
-    quotedKeys[auctionID]=nil
+    local quote=quotedAuctions[auctionID] or info
+    local key=quote and quote.itemKey
+    quotedAuctions[auctionID]=nil
     if key then purchaseKeys[DXMCore:ItemKeyKey(key)]=true end
-    DXMCore:Trigger(Const.ScannerPurchaseCompleted,key)
+    DXMCore:Trigger(Const.ScannerPurchaseCompleted,key,auctionID,
+        quote and tonumber(quote.buyoutAmount) or nil,
+        quote and math.max(1,tonumber(quote.quantity) or 1) or 1)
 end)
 
 function DXMScanner.RequestScan()
@@ -133,7 +177,7 @@ end
 
 function Module:ItemKeyInfoFound(itemID)
 	-- The grouped retry owns metadata completion while its short timer is pending.
-	if self.awaitingDeferredRetry then return end
+	if self.awaitingDeferredRetry or self.awaitingProcessYield then return end
 	self:Process(itemID)
 end
 
@@ -169,6 +213,8 @@ function Module:FinishBrowse()
 	self.items = {}
 	self.deferredResults = {}
 	self.retryingDeferred = false
+	self.itemsSinceYield = 0
+	self.processingSliceStarted = debugprofilestop and debugprofilestop() or nil
 	self.browseFinishedAt = GetTime()
 	if numResults > 0 then
 		self:Next()
@@ -201,6 +247,7 @@ function Module:Fetch(eventKind, results)
 			self.stalledBrowseUpdates = (self.stalledBrowseUpdates or 0) + 1
 		else
 			self.stalledBrowseUpdates = 0
+			self.lastBrowseGrowthAt = GetTime()
 		end
 		self.lastBrowseCount = after
 	elseif eventKind == "updated" then
@@ -222,9 +269,11 @@ function Module:Fetch(eventKind, results)
 		self.browseSize = 12000
 		self.stalledBrowseUpdates = 0
 		self.lastBrowseCount = #self.browseResults
+		self.lastBrowseGrowthAt = GetTime()
+		self.browseDeadline = GetTime() + BROWSE_SCAN_TIMEOUT
 		self:InvertedProgress(false)
 		local generation = self.scanGeneration
-		C_Timer.After(30, function()
+		C_Timer.After(BROWSE_SCAN_TIMEOUT, function()
 			if Module.scanGeneration == generation and Module.scanning and not Module.processing then
 				Module:FinishBrowse()
 			end
@@ -243,12 +292,13 @@ function Module:Fetch(eventKind, results)
 			self.stalledBrowseUpdates = (self.stalledBrowseUpdates or 0) + 1
 		else
 			self.stalledBrowseUpdates = 0
+			self.lastBrowseGrowthAt = GetTime()
 		end
 		self.lastBrowseCount = after
 	end
 
 	local numResults = #self.browseResults
-	if C_AuctionHouse.HasFullBrowseResults() or (self.stalledBrowseUpdates or 0) >= 3 then
+	if C_AuctionHouse.HasFullBrowseResults() then
 		self:FinishBrowse()
 		return
 	end
@@ -257,8 +307,9 @@ function Module:Fetch(eventKind, results)
 		self.browseSize = self.browseSize + 1000
 	end
 
+	local waiting = (self.stalledBrowseUpdates or 0) > 0 and " (waiting for server)" or ""
 	self:SetProgress(numResults/self.browseSize * 100,
-		("Getting results: %d"):format(numResults))
+		("Getting results: %d%s"):format(numResults, waiting))
 
 	-- A browse-result event completes the previous request. Ask for the next
 	-- server page immediately; MoreResults still enforces throttle readiness and
@@ -274,6 +325,14 @@ function Module:MoreResults()
 		end
 		return
 	end
+	if C_AuctionHouse.HasFullBrowseResults() then
+		self:FinishBrowse()
+		return
+	end
+	if self.browseDeadline and GetTime() >= self.browseDeadline then
+		self:FinishBrowse()
+		return
+	end
 
 	if C_AuctionHouse.IsThrottledMessageSystemReady() then
 		self.throttleWaitStartedAt = nil
@@ -282,26 +341,19 @@ function Module:MoreResults()
 		self.moreResultsRequestSerial = (self.moreResultsRequestSerial or 0) + 1
 		local requestSerial = self.moreResultsRequestSerial
 		C_AuctionHouse.RequestMoreBrowseResults()
-		C_Timer.After(2.5, function()
+		C_Timer.After(PAGE_RESPONSE_TIMEOUT, function()
 			if Module.scanGeneration ~= generation or not Module.scanning or Module.processing then return end
 			if Module.moreResultsRequestSerial ~= requestSerial then return end
 			if #(Module.browseResults or {}) <= before then
 				Module.stalledBrowseUpdates = (Module.stalledBrowseUpdates or 0) + 1
-				if Module.stalledBrowseUpdates >= 3 then
-					Module:FinishBrowse()
-				else
-					scheduleMoreResults(Module, 0.1)
-				end
+				local retryDelay = math.min(1, 0.1 * Module.stalledBrowseUpdates)
+				scheduleMoreResults(Module, retryDelay)
 			end
 		end)
 		return
 	end
 
 	self.throttleWaitStartedAt = self.throttleWaitStartedAt or GetTime()
-	if GetTime() - self.throttleWaitStartedAt >= 5 then
-		self:FinishBrowse()
-		return
-	end
 	scheduleMoreResults(self, THROTTLE_POLL_DELAY)
 end
 
@@ -369,6 +421,29 @@ function Module:Next()
 	return self:Process() -- tailcall to avoid building up the call stack
 end
 
+-- Large browse snapshots are processed in short slices so metadata and item
+-- construction cannot freeze a frame. The scan still resumes on the next
+-- frame and preserves the same result order.
+function Module:ContinueProcessing()
+	self.browsePosition = self.browsePosition + 1
+	self.itemsSinceYield = (self.itemsSinceYield or 0) + 1
+	local elapsed = self.processingSliceStarted and debugprofilestop
+		and (debugprofilestop() - self.processingSliceStarted) or 0
+	if self.itemsSinceYield >= LOCAL_PROCESS_BATCH or elapsed >= LOCAL_PROCESS_BUDGET_MS then
+		local generation = self.scanGeneration or 0
+		self.itemsSinceYield = 0
+		self.awaitingProcessYield = true
+		C_Timer.After(0, function()
+			if Module.scanGeneration ~= generation or not Module.scanning or not Module.processing then return end
+			Module.awaitingProcessYield = false
+			Module.processingSliceStarted = debugprofilestop and debugprofilestop() or nil
+			Module:Next()
+		end)
+		return
+	end
+	return self:Next()
+end
+
 -- Process the current item for our items.
 function Module:Process(itemID)
 	if not self.processing then
@@ -383,8 +458,7 @@ function Module:Process(itemID)
 	{ Name = "battlePetSpeciesID", Type = "number", Nilable = false, Default = 0 },
 	]]
 	if not itemKey then
-		self.browsePosition = self.browsePosition + 1
-		return self:Next()
+		return self:ContinueProcessing()
 	end
 
 	local hasLevel = DXMData.itemHasLevel[itemKey.itemID]
@@ -415,17 +489,18 @@ function Module:Process(itemID)
 		if not self.retryingDeferred then
 			tinsert(self.deferredResults, self.processing)
 		end
-		self.browsePosition = self.browsePosition + 1
-		return self:Next()
+		return self:ContinueProcessing()
+	end
+
+	if not DXMScanner.ItemPassesMasterFilter(itemKey, itemInfo) then
+		self.filteredByQuality = (self.filteredByQuality or 0) + 1
+		return self:ContinueProcessing()
 	end
 
 	-- Add the items.
 	self:Add(itemKey, itemInfo, self.processing)
 
-	-- Process cached rows without frame yields. Server pagination is the dominant
-	-- cost and several thousand local rows complete well under a second.
-	self.browsePosition = self.browsePosition + 1
-	return self:Next()
+	return self:ContinueProcessing()
 end
 
 -- Add the given item to the items.
@@ -472,9 +547,9 @@ function Module:Push()
 		localProcessing = finishedAt - browseFinishedAt,
 		items = #items,
 	}
-	print(("DXM scan: %d items in %.2fs (server %.2fs, local %.2fs)"):format(
+	print(("DXM scan: %d items in %.2fs (server %.2fs, local %.2fs, %d removed by master filter)"):format(
 		#items, DXMScanner.LastTimings.total, DXMScanner.LastTimings.browse,
-		DXMScanner.LastTimings.localProcessing))
+		DXMScanner.LastTimings.localProcessing, self.filteredByQuality or 0))
 	self:Reset()
 end
 
@@ -487,6 +562,11 @@ function Module:Reset()
 	self.scanning = false
 	self.processing = false
 	self.awaitingDeferredRetry = false
+	self.awaitingProcessYield = false
+	self.browseDeadline = nil
+	self.processingSliceStarted = nil
+	self.itemsSinceYield = 0
+	self.filteredByQuality = 0
 	self.items = false
 	self:ClearProgress()
 end

@@ -16,9 +16,9 @@ function N:ShowAlert(entry, name, realm)
     self:Print(message)
 end
 
-function N:TriggerEncounter(entry, key, name, realm, guid)
+function N:TriggerEncounter(entry, key, name, realm)
     local now = self:Now()
-    local identity = guid or key
+    local identity = key
     local last = self.lastAlerts[identity] or 0
     local reset = tonumber(self.db.settings.encounterReset) or 120
     local previousSeen = tonumber(entry.lastSeen) or 0
@@ -27,7 +27,7 @@ function N:TriggerEncounter(entry, key, name, realm, guid)
         entry.encounters = (tonumber(entry.encounters) or 0) + 1
     end
     if not entry.firstSeen or entry.firstSeen == 0 then entry.firstSeen = now end
-    entry.lastSeen, entry.lastZone, entry.guid = now, self:Zone(), guid or entry.guid
+    entry.lastSeen, entry.lastZone = now, self:Zone()
     local cooldown = tonumber(entry.alertCooldown) or tonumber(self.db.settings.alertCooldown) or 30
     if newEncounter and now - last >= cooldown then
         self.lastAlerts[identity] = now

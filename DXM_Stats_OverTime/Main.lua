@@ -53,7 +53,8 @@ function Module:ScannerItemsPush(items)
     end
 end
 
--- Append one observation per item after every completed scan.
+-- Keep one observation per item per hour. Repeated scans in the same hour
+-- update that point in place instead of growing and repruning every item list.
 function Module:ScannerItemsCompleted(items)
     local enabled, days, maximum = settings()
     if not enabled then return end
@@ -84,11 +85,17 @@ function Module:ScannerItemsCompleted(items)
         if id and price and price > 0 then
             local list = realm[id]
             if not list then list = {}; realm[id] = list end
-            if not fullPrune then prune(list, cutoff, maximum) end
-            list[#list + 1] = {now, price, tonumber(itemData.totalQuantity) or 0}
-            while #list > maximum do table.remove(list, 1) end
+            local last = list[#list]
+            local quantity = tonumber(itemData.totalQuantity) or 0
+            if last and floor((tonumber(last[1]) or 0) / 3600) == floor(now / 3600) then
+                last[1], last[2], last[3] = now, price, quantity
+            else
+                list[#list + 1] = {now, price, quantity}
+                if #list > maximum then table.remove(list, 1) end
+            end
         end
     end
+    if DXMPriceSummary and DXMPriceSummary.Invalidate then DXMPriceSummary.Invalidate() end
 end
 
 local function weightForAge(hours)

@@ -12,14 +12,15 @@ function N:ApplyMarker(unit, entry, key)
     if not plate then return end
     local previous = self.activeKeys[key]
     if previous and previous.frame and previous.unit ~= unit then previous.frame:Hide() end
-    local frame = plate.NemesisMarker
+    local current = self.activeUnits[unit]
+    local frame = current and current.frame
     if not frame then
-        frame = CreateFrame("Frame", nil, plate)
-        frame:SetFrameStrata("HIGH")
-        frame:SetFrameLevel((plate:GetFrameLevel() or 0) + 20)
+        -- Keep our frame out of Blizzard's protected nameplate hierarchy. It can
+        -- follow the plate without parenting to it or writing fields onto it.
+        frame = CreateFrame("Frame", nil, UIParent)
+        frame:SetFrameStrata("TOOLTIP")
         frame.Icon = frame:CreateTexture(nil, "OVERLAY")
         frame.Icon:SetAllPoints()
-        plate.NemesisMarker = frame
     end
     local size = tonumber(entry.markerSize) or self.db.settings.markerSize
     local x = tonumber(entry.markerOffsetX) or self.db.settings.markerOffsetX

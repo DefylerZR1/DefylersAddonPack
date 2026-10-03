@@ -2,13 +2,13 @@ local N = Nemesis
 
 function N:ObserveUnit(unit, hasNameplate)
     if not self.db or not self.db.settings.enabled then return end
-    local entry, key, name, realm, guid = self:GetEntryByUnit(unit)
+    local entry, key, name, realm = self:GetEntryByUnit(unit)
     if not entry then
         if hasNameplate then self:RemoveUnit(unit) end
         return
     end
     self:ShowMarkerPrompt(unit, entry, key)
-    self:TriggerEncounter(entry, key, name, realm, guid)
+    self:TriggerEncounter(entry, key, name, realm)
 end
 
 function N:ReconcileUnits()

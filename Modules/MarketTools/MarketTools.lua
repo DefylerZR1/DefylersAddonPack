@@ -2,7 +2,7 @@ if not DXMCore or not DXMExchange then return end
 
 local Module = DXMCore:Module("MarketTools", "Scanner")
 local Const = DXMCore.Const()
-local PAGE_SIZE = 11
+local PAGE_SIZE = 10
 local lastItems = {}
 local dealResults, salvageResults = {}, {}
 local views = {}
@@ -11,7 +11,8 @@ local lastScanCount = 0
 local maxDealSamples = 0
 local unsupportedDeals = 0
 local salvageMissingMaterials = {}
-local materialHistoryKeys = {}
+local currentMaterialPrices = {}
+local currentMaterialQuantities = {}
 local materialPriceCache = {}
 local scanMarketValueCache = {}
 local processGeneration = 0
@@ -82,45 +83,59 @@ local function scanMarketValue(id, currentPrice)
     return value, samples, detail
 end
 
-local function materialMarketValue(itemID)
+local function materialMarketValue(itemID, allowHistory)
     itemID = tonumber(itemID)
     if not itemID then return end
-    local cached = materialPriceCache[itemID]
+    local cached = not allowHistory and materialPriceCache[itemID]
     if cached then return cached.value or nil, cached.samples end
 
-    local base = tostring(itemID)
-    local key = materialHistoryKeys[itemID]
-    if not key then
-        local itemLevel = select(4, C_Item.GetItemInfo(itemID))
-        itemLevel = tonumber(itemLevel) or 0
-        key = itemLevel > 0 and (base .. ":" .. itemLevel) or base
+    -- Salvage purchase decisions use the current completed browse scan. A
+    -- tooltip may fall back to persisted market observations when that scan
+    -- did not include the material.
+    local value = tonumber(currentMaterialPrices[itemID])
+    local samples = tonumber(currentMaterialQuantities[itemID]) or 0
+    if not value and allowHistory and DXMPriceSummary and DXMPriceSummary.Get then
+        local summary = DXMPriceSummary.Get({
+            itemID = itemID,
+            itemLevel = 0,
+            itemSuffix = 0,
+            battlePetSpeciesID = 0,
+        })
+        if summary then
+            value = tonumber(summary.average24) or tonumber(summary.average7) or tonumber(summary.latest)
+            samples = tonumber(summary.count24) or tonumber(summary.count7) or 0
+        end
     end
-
-    local value, samples = marketValue(key, 1)
-    if not value and key ~= base then value, samples = marketValue(base, 1) end
-    materialPriceCache[itemID] = {value = value or false, samples = samples or 0}
+    if not allowHistory then
+        materialPriceCache[itemID] = {value = value or false, samples = samples or 0}
+    end
     return value, samples
 end
+
+local salvageItemInfo
 
 local function itemInfo(item)
     local key = item.itemKey
     local itemID = key and key.itemID
     if not itemID then return end
     local query = item.itemData and item.itemData.appearanceLink or itemID
-    local name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(query)
-    if not name and query ~= itemID then
-        name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(itemID)
-    end
-    if not name then
-        if C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(itemID) end
-        return
-    end
+    -- A grouped browse row can carry a representative appearance link whose
+    -- cached classification differs from the actual item key. Classify from
+    -- the real item ID and use the representative link only for display.
+    local info = salvageItemInfo(itemID)
+    local display = query ~= itemID and salvageItemInfo(query) or nil
+    if not info then info = display end
+    if not info then return end
+    local itemLevel = tonumber(key.itemLevel) or 0
     return {
         id = item.id or DXMCore:ItemKeyKey(key), itemID = itemID, itemKey = key,
-        name = name, link = link, quality = quality or 1, level = level or 0,
-        itemType = itemType, itemSubType = itemSubType, maxStack = maxStack or 1,
-        equipLoc = equipLoc, icon = icon, vendor = vendor or 0,
-        classID = classID, buyout = tonumber(item.itemData and item.itemData.minPrice) or 0,
+        name = (display and display.name) or info.name,
+        link = (display and display.link) or info.link,
+        quality = tonumber((display and display.quality) or info.quality) or 1,
+        level = itemLevel > 0 and itemLevel or info.level,
+        itemType = info.itemType, itemSubType = info.itemSubType, maxStack = info.maxStack,
+        equipLoc = info.equipLoc, icon = (display and display.icon) or info.icon, vendor = info.vendor,
+        classID = info.classID, buyout = tonumber(item.itemData and item.itemData.minPrice) or 0,
         browseResult = item.itemData,
     }
 end
@@ -226,6 +241,33 @@ local DISENCHANT_TABLE = {
     },
 }
 
+salvageItemInfo = function(item)
+    local name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(item)
+    local getter = C_Item.GetItemInfoInstant or GetItemInfoInstant
+    local itemID, instantType, instantSubType, instantEquipLoc, instantIcon, instantClassID
+    if getter then
+        itemID, instantType, instantSubType, instantEquipLoc, instantIcon, instantClassID = getter(item)
+    end
+    itemID = tonumber(itemID) or tonumber(item)
+    if not name and itemID and item ~= itemID then
+        name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(itemID)
+    end
+    if not name then
+        if itemID and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(itemID) end
+        return nil, itemID
+    end
+    -- GetItemInfo on profession result buttons can omit the classification
+    -- values on this client. GetItemInfoInstant is the authoritative source for
+    -- weapon/armor class and equipment slot and does not require an item cache.
+    itemType = instantType or itemType
+    itemSubType = instantSubType or itemSubType
+    equipLoc = instantEquipLoc and instantEquipLoc ~= "" and instantEquipLoc or equipLoc
+    icon = instantIcon or icon
+    classID = tonumber(instantClassID) or tonumber(classID)
+    return {itemID=itemID,name=name,link=link,quality=quality or 1,level=level or 0,itemType=itemType,
+        itemSubType=itemSubType,maxStack=maxStack or 1,equipLoc=equipLoc,icon=icon,vendor=vendor or 0,classID=classID},itemID
+end
+
 local function salvageYield(info, referenceOnly)
     local quality = tonumber(info.quality)
     if quality ~= 2 and quality ~= 3 and quality ~= 4 then return end
@@ -273,27 +315,60 @@ local function possibleSalvageOutputs(info)
     end
     return possible
 end
-local function excludedSalvage(result)
-    local config=DXMConfig or {}
-    local exclude=tonumber(config.salvageExcludedMaterialID)
-    if exclude==nil then exclude=10978 end
-    local include=tonumber(config.salvageIncludedMaterialID) or 0
-    local outputs=result.possibleOutputs or {}
-    if exclude>0 and outputs[exclude] then return true end
-    if include>0 and not outputs[include] then return true end
-    for id in tostring(config.salvageExcludedItemIDs or ""):gmatch("%d+") do
-        if tonumber(id)==result.itemID then return true end
+local function materialIDSet(value)
+    local ids={}
+    for id in tostring(value or ""):gmatch("%d+") do
+        id=tonumber(id)
+        if id and id>0 then ids[id]=true end
     end
+    return ids
+end
+local function configuredMaterialIDs(config,key,legacyKey,defaultID)
+    local value=config[key]
+    if value==nil then
+        local legacy=tonumber(config[legacyKey])
+        value=legacy~=nil and legacy or defaultID
+    end
+    return materialIDSet(value)
+end
+local function serializeMaterialIDs(ids)
+    local values={}
+    for id,selected in pairs(ids or {}) do if selected then values[#values+1]=tonumber(id) end end
+    table.sort(values)
+    for index,id in ipairs(values) do values[index]=tostring(id) end
+    return table.concat(values,",")
+end
+local function salvageFilterState(config)
+    config=config or {}
+    local state={
+        excluded=configuredMaterialIDs(config,"salvageExcludedMaterialIDs","salvageExcludedMaterialID",10978),
+        included=configuredMaterialIDs(config,"salvageIncludedMaterialIDs","salvageIncludedMaterialID",0),
+        excludedItems={},
+    }
+    for id in tostring(config.salvageExcludedItemIDs or ""):gmatch("%d+") do state.excludedItems[tonumber(id)]=true end
+    state.hunting=next(state.included)~=nil
+    return state
+end
+local function excludedSalvage(result,state)
+    state=state or salvageFilterState(DXMConfig)
+    local outputs=result.possibleOutputs or {}
+    for id in pairs(state.excluded) do if outputs[id] then return true end end
+    if state.hunting then
+        local matched=false
+        for id in pairs(state.included) do if outputs[id] then matched=true;break end end
+        if not matched then return true end
+    end
+    if state.excludedItems[tonumber(result.itemID)] then return true end
     return false
 end
 
-local function salvageValue(info)
+local function salvageValue(info, allowHistory)
     local yields,observedAttempts = salvageYield(info)
     if not yields then return end
     local total, labels = 0, {}
     for _, output in ipairs(yields) do
         local material = type(output[1])=="number" and {output[1],(C_Item.GetItemInfo(output[1]) or ("Item "..output[1]))} or MATERIALS[output[1]]
-        local price = materialMarketValue(material[1])
+        local price = materialMarketValue(material[1], allowHistory)
         if not price then return nil, nil, "Missing price for " .. material[2],observedAttempts end
         total = total + price * output[2]
         labels[#labels + 1] = ("%.2f x %s"):format(output[2], material[2])
@@ -366,6 +441,10 @@ local salvageQuantityGeneration = 0
 local requestNextSalvageQuantity
 local refreshView
 
+local function salvageViewVisible(view)
+    return view and view.page and view.page:IsShown()
+end
+
 local function salvageQuantityKey(result)
     if not result or not result.itemKey then return end
     return DXMCore:ItemKeyKey(result.itemKey) .. "@" .. tostring(result.buyout or 0)
@@ -412,24 +491,35 @@ end
 refreshView=function(view)
     if not view then return end
     local raw = view.data() or {}
-    local rawCount=view.kind=="salvage" and #groupSalvageResults(raw) or #raw
+    local rawCount=#raw
+    if view.kind=="salvage" then
+        if view.rawCountGeneration~=processGeneration then
+            view.rawGroupedCount=#groupSalvageResults(raw)
+            view.rawCountGeneration=processGeneration
+        end
+        rawCount=view.rawGroupedCount or 0
+    end
+    local config=DXMConfig or {}
+    local salvageState=view.kind=="salvage" and salvageFilterState(config) or nil
+    local hunting=salvageState and salvageState.hunting or false
+    local maximumCost=tonumber(view.maximumCost) or 0
+    local profitRequired=not hunting or tostring(config.salvageMinimumProfitText or ""):match("%S")
+    local roiRequired=not hunting or tostring(config.salvageMinimumROIText or ""):match("%S")
+    local minimumProfit=tonumber(view.minimumProfit) or 0
+    local minimumROI=tonumber(view.minimumROI) or 0
+    local minimumItemLevel=tonumber(view.minimumItemLevel) or 0
+    local maximumItemLevel=tonumber(view.maximumItemLevel) or 0
     local list = {}
     for _, result in ipairs(raw) do
-        local matches = not (view.kind=="salvage" and excludedSalvage(result))
+        local matches = not (salvageState and excludedSalvage(result,salvageState))
         if view.kind=="salvage" and result.quantityAtPrice~=nil
             and result.quantityAtPrice<=0 and not result.quantityPartial then matches=false end
-        if view.kind=="salvage" and DXMScanner and DXMScanner.HasPurchasedItem and DXMScanner.HasPurchasedItem(result.itemKey) then
-            result.quantityAtPrice=loadedQuantityAtPrice(result.itemKey,result.buyout)
-            if result.quantityAtPrice==0 and C_AuctionHouse.HasFullItemSearchResults and C_AuctionHouse.HasFullItemSearchResults(result.itemKey) then matches=false end
-        end
         if view.kind == "salvage" or view.kind == "deals" then
-            local maximumCost = tonumber(view.maximumCost) or 0
-            local hunting=view.kind=="salvage" and (tonumber(DXMConfig and DXMConfig.salvageIncludedMaterialID) or 0)>0
-            local profitRequired=not hunting or tostring(DXMConfig.salvageMinimumProfitText or ""):match("%S")
-            local roiRequired=not hunting or tostring(DXMConfig.salvageMinimumROIText or ""):match("%S")
             matches = matches and (maximumCost <= 0 or (tonumber(result.buyout) or 0) <= maximumCost)
-                and (not profitRequired or (result.profit~=nil and (tonumber(result.profit) or 0) >= (tonumber(view.minimumProfit) or 0)))
-                and (not roiRequired or (result.roi~=nil and (tonumber(result.roi) or 0) >= (tonumber(view.minimumROI) or 0)))
+                and (not profitRequired or (result.profit~=nil and (tonumber(result.profit) or 0) >= minimumProfit))
+                and (not roiRequired or (result.roi~=nil and (tonumber(result.roi) or 0) >= minimumROI))
+                and (minimumItemLevel<=0 or (tonumber(result.itemLevel) or 0)>=minimumItemLevel)
+                and (maximumItemLevel<=0 or (tonumber(result.itemLevel) or 0)<=maximumItemLevel)
             if view.kind=="salvage" and not hunting then matches=matches and result.profit~=nil and result.profit>0 end
         end
         if matches then list[#list + 1] = result end
@@ -451,6 +541,7 @@ refreshView=function(view)
         if view.ascending then return av < bv end
         return av > bv
     end)
+    view.filtered = list
     local pageSize=view.pageSize or PAGE_SIZE
     local maxOffset = math.max(0, #list - pageSize)
     view.offset = math.max(0, math.min(view.offset, maxOffset))
@@ -509,7 +600,8 @@ refreshView=function(view)
     for key,button in pairs(view.headers) do
         button.Label:SetText(button.label .. (key == view.sortKey and (view.ascending and " ^" or " v") or ""))
     end
-    if view.kind=="salvage" and AuctionHouseFrame then
+    local purchaseActive=DXMVendorFinder and DXMVendorFinder.PurchaseActive and DXMVendorFinder.PurchaseActive()
+    if view.kind=="salvage" and AuctionHouseFrame and salvageViewVisible(view) and not purchaseActive then
         for index=1,pageSize do
             local group=list[view.offset+index]
             if group then for _,variant in pairs(group.variants or {}) do queueSalvageQuantity(variant) end end
@@ -529,6 +621,9 @@ salvageQuantityEvents:SetScript("OnEvent",function(_,event,itemKey)
         local id=DXMCore:ItemKeyKey(itemKey)
         local pending=salvageQuantityPending
         local pendingMatches=pending and pending.result.itemKey and DXMCore:ItemKeyKey(pending.result.itemKey)==id
+        -- Blizzard also emits item-result updates while a purchase is settling.
+        -- Those caches can be transitional and must not erase other scanned tiers.
+        if not pendingMatches then return end
         local full=not C_AuctionHouse.HasFullItemSearchResults or C_AuctionHouse.HasFullItemSearchResults(itemKey)
         if pendingMatches and not full and C_AuctionHouse.RequestMoreItemSearchResults then
             C_AuctionHouse.RequestMoreItemSearchResults(itemKey)
@@ -547,7 +642,9 @@ salvageQuantityEvents:SetScript("OnEvent",function(_,event,itemKey)
             C_Timer.After(.10,requestNextSalvageQuantity)
         end
     end
-    for _,view in ipairs(views) do if view.kind=="salvage" then refreshView(view) end end
+    for _,view in ipairs(views) do
+        if view.kind=="salvage" and salvageViewVisible(view) then refreshView(view) end
+    end
 end)
 
 local function startScan(destination)
@@ -563,34 +660,59 @@ local function startScan(destination)
 end
 
 local function buildTable(page, data, valueLabel, intro, kind)
-    local view = {data=data, rows={}, headers={}, sortKey="profit", ascending=false, offset=0, kind=kind,
-        pageSize=kind=="salvage" and 8 or PAGE_SIZE}
+    local view = {page=page, data=data, rows={}, headers={}, sortKey="profit", ascending=false, offset=0, kind=kind,
+        -- Reserve one row of vertical space for the paging/status footer. Eight
+        -- result rows pushed that footer below the Exchange content panel.
+        pageSize=kind=="salvage" and 5 or PAGE_SIZE}
     views[#views+1] = view
     local status = page:CreateFontString(nil,"ARTWORK","GameFontHighlight")
     status:SetPoint("TOPLEFT",page.Description,"BOTTOMLEFT",0,-15); status:SetText(intro)
     view.Status=status
-    local scan=CreateFrame("Button",nil,page,"UIPanelButtonTemplate")
+    local scan=DXMTheme:CreateButton(page)
     scan:SetSize(150,25); scan:SetPoint("TOPRIGHT",page,"TOPRIGHT",-8,-2); scan:SetText("Scan Auction House")
     scan:SetScript("OnClick",function() startScan(kind) end)
+    if kind=="salvage" then
+        local queue=DXMTheme:CreateButton(page)
+        queue:SetSize(120,25);queue:SetPoint("RIGHT",scan,"LEFT",-8,0);queue:SetText("Buy Queue")
+        queue:SetScript("OnClick",function()
+            local entries={}
+            for _,group in ipairs(view.filtered or {}) do
+                local variants={}
+                for _,variant in pairs(group.variants or {}) do variants[#variants+1]=variant end
+                if #variants==0 then variants[1]=group end
+                table.sort(variants,function(a,b)
+                    return DXMCore:ItemKeyKey(a.itemKey) < DXMCore:ItemKeyKey(b.itemKey)
+                end)
+                for _,variant in ipairs(variants) do
+                    local quantity=variant.quantityAtPrice==nil and 1 or math.max(0,math.floor(tonumber(variant.quantityAtPrice) or 0))
+                    for _=1,quantity do entries[#entries+1]=variant end
+                end
+            end
+            resetSalvageQuantities()
+            if DXMVendorFinder and DXMVendorFinder.BuyQueue then DXMVendorFinder.BuyQueue(entries) end
+        end)
+        view.QueueButton=queue
+    end
 
     local resultAnchor = status
     local resultGap = -12
     if kind == "salvage" or kind == "deals" then
         DXMConfig = DXMConfig or {}
-        local filters = CreateFrame("Frame",nil,page)
-        filters:SetPoint("TOPLEFT",status,"BOTTOMLEFT",0,-8); filters:SetPoint("RIGHT",page,"RIGHT",-8,0); filters:SetHeight(kind=="salvage" and 132 or 52)
+        local filters = DXMTheme:CreatePanel(page)
+        filters:SetPoint("TOPLEFT",status,"BOTTOMLEFT",0,-8); filters:SetPoint("RIGHT",page,"RIGHT",-8,0); filters:SetHeight(kind=="salvage" and 138 or 52)
+        filters.DXMBackground:SetColorTexture(.035,.043,.078,.62)
         resultAnchor = filters
-        resultGap = -7
+        resultGap = kind=="salvage" and -24 or -7
 
         local function label(text, relative, gap)
-            local value=filters:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+            local value=filters:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
             if relative then value:SetPoint("LEFT",relative,"RIGHT",gap or 18,0) else value:SetPoint("TOPLEFT",filters,"TOPLEFT",0,-14) end
-            value:SetText(text)
+            value:SetText(text); value:SetTextColor(.788,.643,.957); value:SetWordWrap(false)
             return value
         end
         local function input(relative,width,text)
-            local value=CreateFrame("EditBox",nil,filters,"InputBoxTemplate")
-            value:SetSize(width,24); value:SetPoint("LEFT",relative,"RIGHT",8,0); value:SetAutoFocus(false); value:SetJustifyH("CENTER"); value:SetText(text or "")
+            local value=DXMTheme:CreateInput(filters,width,24)
+            value:SetPoint("LEFT",relative,"RIGHT",8,0); value:SetJustifyH("CENTER"); value:SetText(text or "")
             return value
         end
 
@@ -609,41 +731,97 @@ local function buildTable(page, data, valueLabel, intro, kind)
         hint:SetJustifyH("LEFT")
         hint:SetText("Money format: 1g 25s. Blank maximum " .. (isDeals and "price" or "cost") .. " = no limit; blank minimums = 0.")
 
+        local minLevel,maxLevel
         if kind=="salvage" then
-            hint:SetText("Material search: blank profit/ROI = any. Left-click to buy; excludes win. IDs: comma-separated.")
-            local choices={{0,"None"}}
+            roiLabel:SetText("Minimum ROI (%)")
+            percent:Hide()
+            hint:SetText("Buy Queue advances filtered matches; Blizzard still requires each Accept. Cancel stops. IDs: comma-separated.")
+            hint:ClearAllPoints();hint:SetPoint("TOPLEFT",filters,"BOTTOMLEFT",0,-5);hint:SetPoint("TOPRIGHT",filters,"BOTTOMRIGHT",0,-5)
+            local choices={}
             for _,material in pairs(MATERIALS) do choices[#choices+1]={material[1],material[2]} end
-            table.sort(choices,function(a,b) if a[1]==0 then return b[1]~=0 elseif b[1]==0 then return false end return a[2]<b[2] end)
-            local function materialDropdown(text,key,default,x)
-                local title=filters:CreateFontString(nil,"ARTWORK","GameFontNormalSmall")
-                title:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-37);title:SetText(text)
+            table.sort(choices,function(a,b) return a[2]<b[2] end)
+            local function materialDropdown(text,key,legacyKey,default,x)
+                local title=filters:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall")
+                title:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-37);title:SetText(text);title:SetTextColor(.788,.643,.957);title:SetWordWrap(false)
                 local dropdown=CreateFrame("Frame",nil,filters,"UIDropDownMenuTemplate")
-                dropdown:SetPoint("TOPLEFT",title,"BOTTOMLEFT",-16,-2)
+                dropdown:SetPoint("TOPLEFT",title,"BOTTOMLEFT",0,-2)
                 UIDropDownMenu_SetWidth(dropdown,220)
-                local selected=tonumber(DXMConfig[key]) or default
+                dropdown:SetAlpha(0)
+                local selector=DXMTheme:CreateButton(filters)
+                selector:SetSize(220,25);selector:SetPoint("TOPLEFT",title,"BOTTOMLEFT",0,-3)
+                selector.DXMLabel:SetJustifyH("LEFT")
+                local selected=configuredMaterialIDs(DXMConfig,key,legacyKey,default)
                 local function caption()
-                    for _,choice in ipairs(choices) do if choice[1]==selected then UIDropDownMenu_SetText(dropdown,choice[2]);return end end
-                    UIDropDownMenu_SetText(dropdown,"Unknown material")
+                    local names={}
+                    for _,choice in ipairs(choices) do if selected[choice[1]] then names[#names+1]=choice[2] end end
+                    if #names==0 then selector:SetText("None")
+                    elseif #names==1 then selector:SetText(names[1])
+                    else selector:SetText(("%d materials selected"):format(#names)) end
                 end
                 UIDropDownMenu_Initialize(dropdown,function()
+                    local none=UIDropDownMenu_CreateInfo()
+                    none.text="None (clear all)";none.checked=function() return next(selected)==nil end;none.isNotRadio=true;none.keepShownOnClick=true
+                    none.func=function() wipe(selected);DXMConfig[key]="";caption();view.offset=0;refreshView(view) end
+                    UIDropDownMenu_AddButton(none)
                     for _,choice in ipairs(choices) do
                         local id,name=choice[1],choice[2]
                         local entry=UIDropDownMenu_CreateInfo()
-                        entry.text=name;entry.checked=id==selected
+                        entry.text=name;entry.checked=function() return selected[id] or false end;entry.isNotRadio=true;entry.keepShownOnClick=true
                         entry.func=function()
-                            selected=id;DXMConfig[key]=id;caption()
+                            selected[id]=not selected[id];DXMConfig[key]=serializeMaterialIDs(selected);caption()
                             view.offset=0;refreshView(view)
                         end
                         UIDropDownMenu_AddButton(entry)
                     end
                 end)
+                selector:SetScript("OnClick",function() ToggleDropDownMenu(1,nil,dropdown,selector,0,0) end)
                 caption()
+                return function()
+                    wipe(selected)
+                    DXMConfig[key]=""
+                    caption()
+                end,title,selector
             end
-            materialDropdown("Exclude possible output","salvageExcludedMaterialID",10978,0)
-            materialDropdown("Only show possible output","salvageIncludedMaterialID",0,255)
-            local idsLabel=filters:CreateFontString(nil,"ARTWORK","GameFontNormalSmall")
-            idsLabel:SetPoint("TOPLEFT",filters,"TOPLEFT",0,-91);idsLabel:SetText("Exclude item IDs")
+            local clearExcludedMaterials,excludeOutputsLabel,excludeOutputsSelector=materialDropdown("Exclude possible outputs","salvageExcludedMaterialIDs","salvageExcludedMaterialID",10978,0)
+            local clearIncludedMaterials,includeOutputsLabel,includeOutputsSelector=materialDropdown("Only show possible outputs","salvageIncludedMaterialIDs","salvageIncludedMaterialID",0,255)
+            local idsLabel=filters:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall")
+            idsLabel:SetPoint("TOPLEFT",filters,"TOPLEFT",0,-91);idsLabel:SetText("Exclude item IDs");idsLabel:SetTextColor(.788,.643,.957);idsLabel:SetWordWrap(false)
             local ids=input(idsLabel,160,DXMConfig.salvageExcludedItemIDs)
+            local minLevelLabel=filters:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall")
+            minLevelLabel:SetPoint("TOPLEFT",filters,"TOPLEFT",285,-91);minLevelLabel:SetText("Min item level");minLevelLabel:SetTextColor(.788,.643,.957);minLevelLabel:SetWordWrap(false)
+            minLevel=input(minLevelLabel,48,DXMConfig.salvageMinimumItemLevelText)
+            local maxLevelLabel=label("Max item level",minLevel,18)
+            maxLevel=input(maxLevelLabel,48,DXMConfig.salvageMaximumItemLevelText)
+            local function layoutSalvageFilters(_,width)
+                width=math.max(520,tonumber(width) or filters:GetWidth() or 520)
+                local pad,gap=12,18
+                local topWidth=(width-pad*2-gap*2)/3
+                for index,pair in ipairs({{costLabel,costInput},{profitLabel,profitInput},{roiLabel,roiInput}}) do
+                    local x=pad+(index-1)*(topWidth+gap)
+                    pair[1]:ClearAllPoints();pair[1]:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-9);pair[1]:SetWidth(topWidth);pair[1]:SetJustifyH("LEFT")
+                    pair[2]:ClearAllPoints();pair[2]:SetSize(topWidth,26);pair[2]:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-22)
+                end
+
+                local selectorWidth=(width-pad*2-gap)/2
+                for index,pair in ipairs({{excludeOutputsLabel,excludeOutputsSelector},{includeOutputsLabel,includeOutputsSelector}}) do
+                    local x=pad+(index-1)*(selectorWidth+gap)
+                    pair[1]:ClearAllPoints();pair[1]:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-53);pair[1]:SetWidth(selectorWidth)
+                    pair[2]:ClearAllPoints();pair[2]:SetSize(selectorWidth,26);pair[2]:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-66)
+                end
+
+                local idsWidth=width*.43
+                idsLabel:ClearAllPoints();idsLabel:SetPoint("TOPLEFT",filters,"TOPLEFT",pad,-97);idsLabel:SetWidth(idsWidth);idsLabel:SetJustifyH("LEFT")
+                ids:ClearAllPoints();ids:SetSize(idsWidth,26);ids:SetPoint("TOPLEFT",filters,"TOPLEFT",pad,-110)
+                local levelStart=pad+idsWidth+gap
+                local levelWidth=(width-levelStart-pad-gap)/2
+                for index,pair in ipairs({{minLevelLabel,minLevel},{maxLevelLabel,maxLevel}}) do
+                    local x=levelStart+(index-1)*(levelWidth+gap)
+                    pair[1]:ClearAllPoints();pair[1]:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-97);pair[1]:SetWidth(levelWidth);pair[1]:SetJustifyH("LEFT");pair[1]:SetWordWrap(false)
+                    pair[2]:ClearAllPoints();pair[2]:SetSize(levelWidth,26);pair[2]:SetPoint("TOPLEFT",filters,"TOPLEFT",x,-110)
+                end
+            end
+            filters:HookScript("OnSizeChanged",layoutSalvageFilters)
+            C_Timer.After(0,function() layoutSalvageFilters(filters,filters:GetWidth()) end)
             local function applyIDs()
                 DXMConfig.salvageExcludedItemIDs=ids:GetText() or ""
                 view.offset=0;refreshView(view)
@@ -651,6 +829,21 @@ local function buildTable(page, data, valueLabel, intro, kind)
             ids:SetScript("OnEnterPressed",function(self) self:ClearFocus();applyIDs() end)
             ids:SetScript("OnEditFocusLost",applyIDs)
             ids:SetScript("OnEscapePressed",function(self) self:ClearFocus() end)
+            local clear=DXMTheme:CreateButton(page)
+            clear:SetSize(110,25);clear:SetPoint("RIGHT",view.QueueButton,"LEFT",-8,0);clear:SetText("Clear filters")
+            clear:SetScript("OnClick",function()
+                costInput:SetText("");profitInput:SetText("");roiInput:SetText("");ids:SetText("");minLevel:SetText("");maxLevel:SetText("")
+                DXMConfig.salvageMaximumCostText=""
+                DXMConfig.salvageMinimumProfitText=""
+                DXMConfig.salvageMinimumROIText=""
+                DXMConfig.salvageExcludedItemIDs=""
+                DXMConfig.salvageMinimumItemLevelText=""
+                DXMConfig.salvageMaximumItemLevelText=""
+                clearExcludedMaterials();clearIncludedMaterials()
+                view.maximumCost=0;view.minimumProfit=0;view.minimumROI=0;view.minimumItemLevel=0;view.maximumItemLevel=0;view.offset=0
+                refreshView(view)
+            end)
+            view.ClearFilters=clear
         end
 
         local function applyFilters()
@@ -662,10 +855,14 @@ local function buildTable(page, data, valueLabel, intro, kind)
                 DXMConfig.salvageMaximumCostText=costInput:GetText() or ""
                 DXMConfig.salvageMinimumProfitText=profitInput:GetText() or ""
                 DXMConfig.salvageMinimumROIText=roiInput:GetText() or ""
+                DXMConfig.salvageMinimumItemLevelText=view.MinimumItemLevelInput and view.MinimumItemLevelInput:GetText() or ""
+                DXMConfig.salvageMaximumItemLevelText=view.MaximumItemLevelInput and view.MaximumItemLevelInput:GetText() or ""
             end
             view.maximumCost=parseMoney(costInput:GetText())
             view.minimumProfit=parseMoney(profitInput:GetText())
             view.minimumROI=parseROI(roiInput:GetText())
+            view.minimumItemLevel=tonumber(DXMConfig.salvageMinimumItemLevelText) or 0
+            view.maximumItemLevel=tonumber(DXMConfig.salvageMaximumItemLevelText) or 0
             view.offset=0
             refreshView(view)
         end
@@ -674,17 +871,28 @@ local function buildTable(page, data, valueLabel, intro, kind)
             editBox:SetScript("OnEditFocusLost",applyFilters)
             editBox:SetScript("OnEscapePressed",function(self) self:ClearFocus() end)
         end
+        if kind=="salvage" then
+            view.MinimumItemLevelInput=minLevel
+            view.MaximumItemLevelInput=maxLevel
+            for _,editBox in ipairs({minLevel,maxLevel}) do
+                editBox:SetScript("OnEnterPressed",function(self) self:ClearFocus();applyFilters() end)
+                editBox:SetScript("OnEditFocusLost",applyFilters)
+                editBox:SetScript("OnEscapePressed",function(self) self:ClearFocus() end)
+            end
+        end
         view.maximumCost=parseMoney(costInput:GetText())
         view.minimumProfit=parseMoney(profitInput:GetText())
         view.minimumROI=parseROI(roiInput:GetText())
+        view.minimumItemLevel=kind=="salvage" and (tonumber(DXMConfig.salvageMinimumItemLevelText) or 0) or 0
+        view.maximumItemLevel=kind=="salvage" and (tonumber(DXMConfig.salvageMaximumItemLevelText) or 0) or 0
         view.FilterInputs={costInput,profitInput,roiInput}
     end
 
-    local frame=CreateFrame("Frame",nil,page,"InsetFrameTemplate")
+    local frame=DXMTheme:CreatePanel(page)
     frame:SetPoint("TOPLEFT",resultAnchor,"BOTTOMLEFT",-6,resultGap); frame:SetPoint("RIGHT",page,"RIGHT",-8,0); frame:SetHeight(view.pageSize*25+32)
     local header=CreateFrame("Frame",nil,frame); header:SetPoint("TOPLEFT",5,-5); header:SetPoint("TOPRIGHT",-5,-5); header:SetHeight(22)
     header:SetFrameLevel(frame:GetFrameLevel()+2)
-    local bg=header:CreateTexture(nil,"BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(.16,.12,.05,.9)
+    local bg=header:CreateTexture(nil,"BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(.071,.082,.133,1)
     local widths=kind=="salvage" and {0,.38,.47,.61,.78,.92,1} or {0,.46,.62,.78,.92,1}
     local costLabel = kind == "salvage" and "Cost / unit" or "Buyout"
     local displayValueLabel = kind == "salvage" and "Expected Value" or valueLabel
@@ -710,7 +918,7 @@ local function buildTable(page, data, valueLabel, intro, kind)
         button:SetFrameLevel(header:GetFrameLevel()+1)
         button:SetHighlightTexture("Interface\QuestFrame\UI-QuestTitleHighlight","ADD")
         button.Label=button:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
-        button.Label:SetAllPoints(); button.Label:SetJustifyH(entry[2]=="name" and "LEFT" or "CENTER"); button.Label:SetTextColor(1,.82,0); button.Label:SetText(entry[1])
+        button.Label:SetAllPoints(); button.Label:SetJustifyH(entry[2]=="name" and "LEFT" or "CENTER"); button.Label:SetTextColor(.788,.643,.957); button.Label:SetText(entry[1])
         button:SetScript("OnClick",function()
             if view.sortKey==entry[2] then view.ascending=not view.ascending
             else view.sortKey=entry[2]; view.ascending=entry[2]=="name" or entry[2]=="buyout" end
@@ -723,10 +931,11 @@ local function buildTable(page, data, valueLabel, intro, kind)
     for i=1,view.pageSize do
         local row=CreateFrame("Button",nil,frame); row:SetHeight(25); row:SetPoint("LEFT",header); row:SetPoint("RIGHT",header); row:SetPoint("TOP",previous or header,"BOTTOM")
         local rb=row:CreateTexture(nil,"BACKGROUND"); rb:SetAllPoints(); rb:SetColorTexture(i%2==0 and .10 or .035,i%2==0 and .10 or .035,i%2==0 and .10 or .035,.75)
-        local line=row:CreateTexture(nil,"BORDER"); line:SetPoint("BOTTOMLEFT"); line:SetPoint("BOTTOMRIGHT"); line:SetHeight(1); line:SetColorTexture(.31,.27,.19,.72)
+        local line=row:CreateTexture(nil,"BORDER"); line:SetPoint("BOTTOMLEFT"); line:SetPoint("BOTTOMRIGHT"); line:SetHeight(1); line:SetColorTexture(.20,.157,.247,.82)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         row:SetHighlightTexture("Interface\QuestFrame\UI-QuestTitleHighlight","ADD"); row:SetScript("OnClick",function(self,button)
             if button=="RightButton" and view.kind=="salvage" and DXMVendorFinder and DXMVendorFinder.BuyResult then
+                resetSalvageQuantities()
                 DXMVendorFinder.BuyResult(self.result)
             elseif IsModifiedClick and IsModifiedClick("CHATLINK") and self.result and self.result.link then
                 ChatEdit_InsertLink(self.result.link)
@@ -743,9 +952,13 @@ local function buildTable(page, data, valueLabel, intro, kind)
         view.rows[i]=row; previous=row
     end
     header:SetScript("OnSizeChanged",function(_,w) if w>0 then layout(w) end end); C_Timer.After(0,function() if header:GetWidth()>0 then layout(header:GetWidth()) end end)
-    view.Previous=CreateFrame("Button",nil,page,"UIPanelButtonTemplate"); view.Previous:SetSize(28,22); view.Previous:SetPoint("TOPLEFT",frame,"BOTTOMLEFT",4,-6); view.Previous:SetText("<"); view.Previous:SetScript("OnClick",function() view.offset=view.offset-view.pageSize; refreshView(view) end)
-    view.Next=CreateFrame("Button",nil,page,"UIPanelButtonTemplate"); view.Next:SetSize(28,22); view.Next:SetPoint("LEFT",view.Previous,"RIGHT",5,0); view.Next:SetText(">"); view.Next:SetScript("OnClick",function() view.offset=view.offset+view.pageSize; refreshView(view) end)
-    view.Count=page:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); view.Count:SetPoint("LEFT",view.Next,"RIGHT",10,0)
+    view.Previous=DXMTheme:CreateButton(page); view.Previous:SetSize(28,22); view.Previous:SetPoint("TOPLEFT",frame,"BOTTOMLEFT",4,-6); view.Previous:SetText("<"); view.Previous:SetScript("OnClick",function() view.offset=view.offset-view.pageSize; refreshView(view) end)
+    view.Next=DXMTheme:CreateButton(page); view.Next:SetSize(28,22); view.Next:SetPoint("LEFT",view.Previous,"RIGHT",5,0); view.Next:SetText(">"); view.Next:SetScript("OnClick",function() view.offset=view.offset+view.pageSize; refreshView(view) end)
+    view.Count=page:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall")
+    view.Count:SetPoint("LEFT",view.Next,"RIGHT",10,0)
+    view.Count:SetPoint("RIGHT",page,"RIGHT",-105,0)
+    view.Count:SetJustifyH("LEFT")
+    view.Count:SetWordWrap(false)
     refreshView(view)
     return view
 end
@@ -758,12 +971,24 @@ local function process(items)
     maxDealSamples = 0
     unsupportedDeals = 0
     wipe(salvageMissingMaterials)
-    wipe(materialHistoryKeys)
+    wipe(currentMaterialPrices)
+    wipe(currentMaterialQuantities)
     wipe(materialPriceCache)
     wipe(scanMarketValueCache)
     for _, item in ipairs(lastItems) do
         local itemID = item.itemKey and item.itemKey.itemID
-        if itemID and item.id then materialHistoryKeys[itemID] = item.id end
+        local itemData = item.itemData
+        local price = itemData and tonumber(itemData.minPrice)
+        if itemID and price and price > 0 then
+            local old = currentMaterialPrices[itemID]
+            if not old or price < old then
+                currentMaterialPrices[itemID] = price
+                currentMaterialQuantities[itemID] = tonumber(itemData.totalQuantity) or 0
+            elseif price == old then
+                currentMaterialQuantities[itemID] = math.max(currentMaterialQuantities[itemID] or 0,
+                    tonumber(itemData.totalQuantity) or 0)
+            end
+        end
     end
 
     local position = 1
@@ -799,7 +1024,7 @@ local function process(items)
                 local possible=possibleSalvageOutputs(info)
                 if next(possible) then
                     local basis=observedAttempts and ("Observed from %d disenchant%s: "):format(observedAttempts,observedAttempts==1 and "" or "s") or "Reference estimate: "
-                    salvageResults[#salvageResults+1]={itemID=info.itemID,itemKey=info.itemKey,sequence=#salvageResults+1,name=info.name,link=info.link,icon=info.icon,quality=info.quality,buyout=info.buyout,maximumBuyout=info.buyout,value=salvage,purchaseLimit=salvage,profit=salvage and salvage-info.buyout or nil,roi=salvage and (salvage-info.buyout)/info.buyout*100 or nil,browseResult=info.browseResult,detail=basis..(outputs or missing or "No valuation available"),observedAttempts=observedAttempts,possibleOutputs=possible}
+                    salvageResults[#salvageResults+1]={itemID=info.itemID,itemKey=info.itemKey,itemLevel=info.level,sequence=#salvageResults+1,name=info.name,link=info.link,icon=info.icon,quality=info.quality,buyout=info.buyout,maximumBuyout=info.buyout,value=salvage,purchaseLimit=salvage,profit=salvage and salvage-info.buyout or nil,roi=salvage and (salvage-info.buyout)/info.buyout*100 or nil,browseResult=info.browseResult,detail=basis..(outputs or missing or "No valuation available"),observedAttempts=observedAttempts,possibleOutputs=possible}
                 end
             end
             position = position + 1
@@ -825,6 +1050,8 @@ end
 local function buildSalvage(page)
     local view=buildTable(page,function() return salvageResults end,"Salvage Value","Same item and price, suffixes combined. Qty: + = more variants to load; values are per unit.","salvage")
     view.intro="Same item and price, suffixes combined. Qty: + = more variants to load; values are per unit."
+    page:HookScript("OnShow",function() refreshView(view) end)
+    page:HookScript("OnHide",resetSalvageQuantities)
 end
 
 local function historySummary()
@@ -844,7 +1071,7 @@ local function historySummary()
 end
 
 local function buildScanner(page)
-    local button=CreateFrame("Button",nil,page,"UIPanelButtonTemplate")
+    local button=DXMTheme:CreateButton(page)
     button:SetSize(180,30); button:SetPoint("TOPLEFT",page.Description,"BOTTOMLEFT",0,-20); button:SetText("Scan Auction House")
     button:SetScript("OnClick",function() startScan("scanner") end)
     scannerStatus=page:CreateFontString(nil,"ARTWORK","GameFontHighlight")
@@ -951,8 +1178,21 @@ local function buildValuation(page)
 end
 
 function Module:Boot(hook) hook(Const.ScannerPurchaseCompleted,Module.PurchaseCompleted); hook(Const.ScannerItemsCompleted,Module.ScannerItemsCompleted); hook(Const.SellItemLoaded,Module.SellItemLoaded) end
-function Module:PurchaseCompleted()
-    for _,view in ipairs(views) do if view.kind=="salvage" then refreshView(view) end end
+function Module:PurchaseCompleted(itemKey,auctionID,buyoutAmount,quantity)
+    local key=itemKey and DXMCore:ItemKeyKey(itemKey)
+    local price=tonumber(buyoutAmount)
+    local bought=math.max(1,tonumber(quantity) or 1)
+    if key and price and price>0 then
+        for _,result in ipairs(salvageResults) do
+            if result.itemKey and DXMCore:ItemKeyKey(result.itemKey)==key
+                and tonumber(result.buyout)==price and result.quantityAtPrice~=nil then
+                result.quantityAtPrice=math.max(0,result.quantityAtPrice-bought)
+            end
+        end
+    end
+    for _,view in ipairs(views) do
+        if view.kind=="salvage" and salvageViewVisible(view) then refreshView(view) end
+    end
 end
 function Module:ScannerItemsCompleted(items)
     -- History is appended by a later scan listener. Defer calculations one frame
@@ -966,29 +1206,35 @@ end
 
 DXMSalvage = {
     CanDisenchant = function(item)
-        local getter=C_Item and C_Item.GetItemInfoInstant or GetItemInfoInstant
-        local itemID=item and getter and tonumber((getter(item))) or tonumber(item)
-        if not itemID then return false end
-        local name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(item)
-        if not name and item~=itemID then
-            name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(itemID)
-        end
-        if not name then
-            if C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(itemID) end
-            return false
-        end
-        local info={itemID=itemID,name=name,link=link,quality=quality or 1,level=level or 0,itemType=itemType,itemSubType=itemSubType,maxStack=maxStack or 1,equipLoc=equipLoc,icon=icon,vendor=vendor or 0,classID=classID}
+        if not item then return false end
+        local info = salvageItemInfo(item)
+        if not info then return false end
         return salvageYield(info,true)~=nil,info
     end,
-    Value = function(itemID)
+    Value = function(itemID, allowHistory)
         itemID = tonumber(itemID)
         if not itemID then return end
-        local name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(itemID)
-        if not name then return end
-        return salvageValue({itemID=itemID, name=name, link=link, quality=quality or 1, level=level or 0, itemType=itemType, itemSubType=itemSubType, maxStack=maxStack or 1, equipLoc=equipLoc, icon=icon, vendor=vendor or 0, classID=classID})
+        local info = salvageItemInfo(itemID)
+        if not info then return end
+        return salvageValue(info, allowHistory)
     end,
     MaterialValue = function(itemID)
         return materialMarketValue(itemID)
+    end,
+    MarkUnavailable = function(itemKey, price)
+        if not itemKey then return end
+        local key = DXMCore:ItemKeyKey(itemKey)
+        price = tonumber(price)
+        for _, result in ipairs(salvageResults) do
+            if result.itemKey and DXMCore:ItemKeyKey(result.itemKey) == key
+                and tonumber(result.buyout) == price then
+                result.quantityAtPrice = 0
+                result.quantityPartial = false
+            end
+        end
+        for _, view in ipairs(views) do
+            if view.kind == "salvage" and salvageViewVisible(view) then refreshView(view) end
+        end
     end,
 }
 DXMExchange:RegisterPageBuilder("scanner",buildScanner)

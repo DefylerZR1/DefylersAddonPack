@@ -4,7 +4,7 @@
 ## Interface: 16001
 ## Dependencies: DXM
 ## SavedVariables: DXMSharedExport, DXMSharedImport, DXMSharedConfig
-## Version: 0.13.17
+## Version: 0.14.49
 ## Author: DefylerZR1
 
 RelaySnapshot.lua

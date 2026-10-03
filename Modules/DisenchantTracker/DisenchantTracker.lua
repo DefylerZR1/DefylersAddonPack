@@ -7,6 +7,7 @@ Module.bootType = Const.BootType.PlayerEnteringWorld
 local DISENCHANT_SPELL_ID = 13262
 local target
 local completed
+local lootCapturePending = false
 
 local function now() return GetServerTime and GetServerTime() or time() end
 local function itemID(link)
@@ -30,34 +31,19 @@ local function remember(link)
     if not link then return end
     target={link=link,itemID=itemID(link),targetedAt=GetTime()}
 end
-local function containerLink(bag,slot)
-    if C_Container and C_Container.GetContainerItemLink then return C_Container.GetContainerItemLink(bag,slot) end
-    if GetContainerItemLink then return GetContainerItemLink(bag,slot) end
-end
-local function installHooks()
-    if Module.hooksInstalled then return end
-    Module.hooksInstalled=true
-    if C_Container and C_Container.PickupContainerItem then
-        hooksecurefunc(C_Container,"PickupContainerItem",function(bag,slot) remember(containerLink(bag,slot)) end)
+local function promotePreparedTargetAtLoot()
+    if completed then return true end
+    -- Secure actions may finish before DDQ's safe PostClick bookkeeping runs.
+    -- A target exists only after DDQ's own Disenchant button was clicked, so
+    -- the immediately following disenchant loot can complete that handoff
+    -- without putting addon code back into the protected PreClick path.
+    if target and GetTime()-(target.targetedAt or 0)<10 then
+        completed=target
+        completed.completedAt=GetTime()
+        target=nil
+        return true
     end
-    if C_Container and C_Container.UseContainerItem then
-        hooksecurefunc(C_Container,"UseContainerItem",function(bag,slot) remember(containerLink(bag,slot)) end)
-    elseif UseContainerItem then
-        hooksecurefunc("UseContainerItem",function(bag,slot) remember(containerLink(bag,slot)) end)
-    end
-    if PickupInventoryItem then
-        hooksecurefunc("PickupInventoryItem",function(slot) remember(GetInventoryItemLink("player",slot)) end)
-    end
-    if SpellTargetItem then
-        hooksecurefunc("SpellTargetItem",function(value)
-            local _,link=C_Item.GetItemInfo(value); remember(link)
-        end)
-    end
-    if UseItemByName then
-        hooksecurefunc("UseItemByName",function(value)
-            local _,link=C_Item.GetItemInfo(value); remember(link)
-        end)
-    end
+    return false
 end
 local function record(outputs)
     if not completed or not completed.itemID or not next(outputs) then return end
@@ -89,12 +75,29 @@ local function record(outputs)
     end
 end
 
+local function captureDisenchantLoot()
+    lootCapturePending=false
+    promotePreparedTargetAtLoot()
+    if not completed or GetTime()-(completed.completedAt or 0)>10 then return end
+    local outputs={}
+    for slot=1,(GetNumLootItems and GetNumLootItems() or 0) do
+        if not GetLootSlotType or GetLootSlotType(slot)==LOOT_SLOT_ITEM then
+            local link=GetLootSlotLink and GetLootSlotLink(slot)
+            local id=itemID(link)
+            if id then
+                local _,_,quantity=GetLootSlotInfo(slot)
+                outputs[id]=(outputs[id] or 0)+math.max(1,tonumber(quantity) or 1)
+            end
+        end
+    end
+    record(outputs)
+    completed=nil
+end
+
 local events=CreateFrame("Frame")
-for _,event in ipairs({"PLAYER_ENTERING_WORLD","UNIT_SPELLCAST_SUCCEEDED","UNIT_SPELLCAST_FAILED","UNIT_SPELLCAST_INTERRUPTED","LOOT_OPENED","LOOT_CLOSED"}) do events:RegisterEvent(event) end
+for _,event in ipairs({"UNIT_SPELLCAST_SUCCEEDED","UNIT_SPELLCAST_FAILED","UNIT_SPELLCAST_INTERRUPTED","LOOT_OPENED","LOOT_CLOSED"}) do events:RegisterEvent(event) end
 events:SetScript("OnEvent",function(_,event,...)
-    if event=="PLAYER_ENTERING_WORLD" then
-        installHooks()
-    elseif event=="UNIT_SPELLCAST_SUCCEEDED" then
+    if event=="UNIT_SPELLCAST_SUCCEEDED" then
         local unit,castGUID,spellID=...
         spellID=tonumber(spellID)
         if unit=="player" and spellID==DISENCHANT_SPELL_ID and target and GetTime()-(target.targetedAt or 0)<10 then
@@ -106,24 +109,24 @@ events:SetScript("OnEvent",function(_,event,...)
         local unit,castGUID,spellID=...
         if unit=="player" and tonumber(spellID)==DISENCHANT_SPELL_ID then target=nil;completed=nil end
     elseif event=="LOOT_OPENED" then
-        if not completed or GetTime()-(completed.completedAt or 0)>10 then return end
-        local outputs={}
-        for slot=1,(GetNumLootItems and GetNumLootItems() or 0) do
-            if not GetLootSlotType or GetLootSlotType(slot)==LOOT_SLOT_ITEM then
-                local link=GetLootSlotLink and GetLootSlotLink(slot)
-                local id=itemID(link)
-                if id then
-                    local _,_,quantity=GetLootSlotInfo(slot)
-                    outputs[id]=(outputs[id] or 0)+math.max(1,tonumber(quantity) or 1)
-                end
-            end
+        -- The client can open disenchant loot before DDQ's protected button
+        -- reaches its safe PostClick handler. Defer one frame so PostClick can
+        -- supply the exact source item, then read the loot before DDQ collects it.
+        if lootCapturePending then return end
+        lootCapturePending=true
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0,captureDisenchantLoot)
+        else
+            captureDisenchantLoot()
         end
-        record(outputs)
-        completed=nil
     elseif event=="LOOT_CLOSED" then
         if completed and GetTime()-(completed.completedAt or 0)>10 then completed=nil end
     end
 end)
+
+-- DDQ supplies the exact item before its protected disenchant action. Do not
+-- hook protected bag-use functions: doing so taints unrelated right-click uses.
+DXMDisenchantTracker={Prepare=remember}
 
 DXMSalvageObservations={
     Get=function(sourceItemID)

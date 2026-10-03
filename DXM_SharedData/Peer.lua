@@ -91,7 +91,11 @@ local function addPeerPoint(marketKey, capturedAt, id, price, quantity)
     local market = DXMSharedImport.markets[marketKey]
     if type(market) ~= "table" then market = {}; DXMSharedImport.markets[marketKey] = market end
     local rows = market[id]
-    if type(rows) ~= "table" then rows = {}; market[id] = rows end
+    if type(rows) ~= "table" then
+        rows = {}
+        market[id] = rows
+        if DXMPriceSummary and DXMPriceSummary.Invalidate then DXMPriceSummary.Invalidate(true) end
+    end
 
     local hour = floor(capturedAt / 3600)
     for _, row in ipairs(rows) do

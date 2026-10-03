@@ -57,6 +57,7 @@ local function estimate()
 end
 
 local footer,label,summary,queued
+local priceRefreshRegistered
 local function tooltip()
     if not footer or not summary then return end
     GameTooltip:SetOwner(footer,"ANCHOR_TOPLEFT")
@@ -94,7 +95,13 @@ local function schedule()
     queued=true
     C_Timer.After(.2,refresh)
 end
+local function registerPriceRefresh()
+    if priceRefreshRegistered or not DXMPriceSummary or not DXMPriceSummary.RegisterRefresh then return end
+    DXMPriceSummary.RegisterRefresh(schedule)
+    priceRefreshRegistered=true
+end
 local function attach()
+    registerPriceRefresh()
     if footer or (InCombatLockdown and InCombatLockdown()) then return end
     local bag=ContainerFrameCombinedBags
     if not bag or not bag.MoneyFrame then return end
@@ -108,11 +115,6 @@ local function attach()
     footer:SetScript("OnLeave",function() GameTooltip:Hide() end)
     footer:SetScript("OnShow",function() layoutFooter();schedule() end)
     bag.MoneyFrame:HookScript("OnSizeChanged",function() layoutFooter() end)
-    local elapsed=0
-    footer:SetScript("OnUpdate",function(_,delta)
-        elapsed=elapsed+delta
-        if elapsed>=10 then elapsed=0;schedule() end
-    end)
     schedule()
 end
 local events=CreateFrame("Frame")

@@ -8,7 +8,7 @@
 ## OptionalDependencies: !nLog, SlideBar, Configator, Babylonian, DebugLib, TipHelper, LibExtraTip, LibDataBroker
 ## SavedVariables: DXMStatsOverTimeData, DXMPriceHistoryData, DXMPriceHistoryMeta
 ##
-## Version: 0.13.17
+## Version: 0.13.18
 ## Revision: $Id$
 ## Author: DefylerZR1
 ## X-Part-Of: DXM
