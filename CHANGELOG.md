@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.3
+
+This hotfix refreshes the CurseForge package with Nemesis 0.3.28. Nemesis now avoids restricted nameplate GUID comparisons under the Midnight secret-value system.
+
 ## v1.1.2
 
 This hotfix removes blocked Auction House posting calls. DXM now prepares Blizzard's native sell form with the selected item, quantity, price, and duration, then advances the queue after Blizzard confirms the auction.

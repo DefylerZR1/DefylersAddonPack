@@ -35,6 +35,8 @@ function N:SplitCharacter(text, realmOverride)
 end
 
 function N:UnitIdentity(unit)
+    -- Midnight can mark nameplate GUIDs as secret. Identity matching must use
+    -- accessible unit/name APIs and must never read or compare UnitGUID values.
     local exists = UnitExists(unit)
     if isSecret(exists) or not exists then return end
     if UnitIsUnit then

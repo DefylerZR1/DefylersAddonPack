@@ -1,7 +1,7 @@
 Nemesis = Nemesis or {}
 local N = Nemesis
 
-N.VERSION = "0.3.27"
+N.VERSION = "0.3.28"
 N.MEDIA = "Interface\\AddOns\\Nemesis\\Media\\"
 N.markerNames = {
     "Bullseye", "Triple Ring", "Crosshair", "Four Arrows", "Vertical Scope",
