@@ -2,7 +2,7 @@ if not DXMCore then return end
 
 local Module = DXMCore:Module("MerchantSell")
 Module.bootType = DXMCore.Const().BootType.PlayerEnteringWorld
-DXMConfig = DXMConfig or {}
+DXMConfig = type(DXMConfig) == "table" and DXMConfig or {}
 if DXMConfig.merchantSellProfitable == nil then DXMConfig.merchantSellProfitable = true end
 if DXMConfig.merchantSellJunk == nil then DXMConfig.merchantSellJunk = true end
 if DXMConfig.merchantSellAll == nil then DXMConfig.merchantSellAll = false end
@@ -39,7 +39,7 @@ local function categoryProtected(classID, subclassID)
     return false
 end
 
-local panel, tab, status, summary, sellButton, stopButton
+local panel, tab, status, summary, sellButton, stopButton, alwaysIgnoreButton, scrollFrame
 local rows = {}
 local candidates = {}
 local sellQueue
@@ -49,6 +49,17 @@ local generation = 0
 local ROWS = 12
 local nativeWidth, nativeHeight
 local specialtyProtected = 0
+local selectedCandidate
+
+local function ignoreTable()
+    if type(DXMConfig) ~= "table" then DXMConfig = {} end
+    if type(DXMConfig.sellAlwaysIgnore) ~= "table" then DXMConfig.sellAlwaysIgnore = {} end
+    return DXMConfig.sellAlwaysIgnore
+end
+
+local function isAlwaysIgnored(itemID)
+    return ignoreTable()[tostring(tonumber(itemID) or itemID)] == true
+end
 
 local protectedItemIDs = {}
 
@@ -88,6 +99,7 @@ end
 local function itemInfo(bag, slot)
     local info = C_Container.GetContainerItemInfo(bag, slot)
     if not info or not info.itemID or info.isLocked or info.isBound then return end
+    if isAlwaysIgnored(info.itemID) then return end
     if protectedItemIDs[tonumber(info.itemID)] then return end
     local quest = C_Container.GetContainerItemQuestInfo and C_Container.GetContainerItemQuestInfo(bag, slot)
     if questProtected(quest) then return end
@@ -134,6 +146,7 @@ local function isSpecialtyBag(bag, family)
     return (reagentBag and bag == reagentBag) or (tonumber(family) or 0) ~= 0
 end
 local function scanCandidates()
+    local selectedItemID = selectedCandidate and selectedCandidate.itemID
     refreshProtectedItems()
     wipe(candidates)
     specialtyProtected = 0
@@ -157,41 +170,65 @@ local function scanCandidates()
         if a.bag ~= b.bag then return a.bag < b.bag end
         return a.slot < b.slot
     end)
+    selectedCandidate = nil
+    if selectedItemID then
+        for _, entry in ipairs(candidates) do
+            if entry.itemID == selectedItemID then selectedCandidate = entry; break end
+        end
+    end
 end
 
 local function queueActive()
     return sellQueue ~= nil
 end
 
-local function refreshRows(message)
+local function recordManualVendorIncome(delta)
+    delta = math.floor(tonumber(delta) or 0)
+    if delta <= 0 or queueActive() or not MerchantFrame or not MerchantFrame:IsShown() then return false end
+    if not DXMLedger or not DXMLedger.RecordVendorSale then return false end
+    DXMLedger:RecordVendorSale({
+        name="Manual vendor sales", quantity=1, total=delta,
+    })
+    return true
+end
+
+local function refreshRows(message, skipScan)
     if not panel then return end
-    if not queueActive() then scanCandidates() end
+    if not queueActive() and not skipScan then scanCandidates() end
     local list = queueActive() and sellQueue or candidates
     local total, units = 0, 0
     for _, entry in ipairs(list or {}) do
         total = total + (entry.vendorTotal or 0)
         units = units + (entry.quantity or 0)
     end
+    if scrollFrame and FauxScrollFrame_Update then
+        FauxScrollFrame_Update(scrollFrame, #(list or {}), ROWS, 29)
+    end
+    local offset = scrollFrame and FauxScrollFrame_GetOffset and FauxScrollFrame_GetOffset(scrollFrame) or 0
     for index, row in ipairs(rows) do
-        local entry = list and list[index]
+        local entry = list and list[offset + index]
         row.entry = entry
+        row.listIndex = offset + index
         if entry then
             row.Icon:SetTexture(entry.icon)
             row.Name:SetText(entry.link or entry.name)
             row.Quantity:SetText(entry.quantity)
             row.Reason:SetText(entry.reason)
             row.Value:SetText(money(entry.vendorTotal))
+            row.Selected:SetShown(entry == selectedCandidate)
             row:Show()
         else
+            row.Selected:Hide()
             row:Hide()
         end
     end
     summary:SetText(("%d stacks / %d items    Vendor value %s    %d specialty-bag stacks protected"):format(#(list or {}), units, money(total), specialtyProtected))
     status:SetText(message or (#list == 0 and "No items match the enabled safe-selling rules." or
-        "Review the queue, then sell every matching stack automatically. Profession tools are always protected."))
+        "Review the queue. Select a row to always ignore that item, or sell every matching stack."))
     sellButton:SetText(queueActive() and "Selling..." or ("Sell Queue (" .. #list .. ")"))
     sellButton:SetEnabled(not queueActive() and #list > 0)
     stopButton:SetEnabled(queueActive())
+    alwaysIgnoreButton:SetEnabled(not queueActive() and selectedCandidate ~= nil)
 end
 
 local function stopQueue(message)
@@ -203,22 +240,50 @@ end
 
 local sellNext
 
+local function findQueuedStack(entry)
+    local current = itemInfo(entry.bag, entry.slot)
+    if current and current.itemID == entry.itemID and classify(current) then return current end
+
+    local lastBag = Enum and Enum.BagIndex and Enum.BagIndex.ReagentBag or NUM_BAG_SLOTS or 4
+    for bag = 0, lastBag do
+        local _, family = C_Container.GetContainerNumFreeSlots(bag)
+        if not isSpecialtyBag(bag, family) then
+            for slot = 1, (C_Container.GetContainerNumSlots(bag) or 0) do
+                current = itemInfo(bag, slot)
+                if current and current.itemID == entry.itemID and classify(current) then
+                    entry.bag, entry.slot = bag, slot
+                    return current
+                end
+            end
+        end
+    end
+end
+
 local function confirmPending()
     if not pending then return end
+    local entry = pending.entry
+    local expectedTotal = pending.before * entry.vendorUnit
+    local moneyReceived = math.max(0, (tonumber(GetMoney and GetMoney()) or pending.moneyBefore) - pending.moneyBefore)
     local item = C_Container.GetContainerItemInfo(pending.entry.bag, pending.entry.slot)
     local remaining = item and tonumber(item.itemID) == pending.entry.itemID and (tonumber(item.stackCount) or 0) or 0
     local sold = math.max(0, pending.before - remaining)
+    -- Combined bags may immediately refill the vacated slot with another stack
+    -- of the same item. In that case the slot looks unchanged even though the
+    -- merchant has paid for the complete stack, so confirm it from the wallet.
+    if moneyReceived >= expectedTotal and expectedTotal > 0 then sold = pending.before end
     if sold <= 0 then return end
-    local entry = pending.entry
     if DXMLedger and DXMLedger.RecordVendorSale then
         DXMLedger:RecordVendorSale({
             itemID=entry.itemID, itemLink=entry.link, name=entry.name, quantity=sold,
             total=sold * entry.vendorUnit,
         })
     end
+    entry.sellRetries = nil
     pending = nil
     queueIndex = queueIndex + 1
-    C_Timer.After(.08, sellNext)
+    -- Give the server and combined-bag layout time to settle before locating
+    -- the next queued stack.
+    C_Timer.After(.10, sellNext)
 end
 
 sellNext = function()
@@ -235,14 +300,17 @@ sellNext = function()
         refreshRows(("Sold %d queued stacks."):format(count))
         return
     end
-    local current = itemInfo(entry.bag, entry.slot)
-    if not current or current.itemID ~= entry.itemID or not classify(current) then
+    local current = findQueuedStack(entry)
+    if not current then
         queueIndex = queueIndex + 1
-        C_Timer.After(0, sellNext)
+        C_Timer.After(.10, sellNext)
         return
     end
     entry.quantity, entry.vendorTotal, entry.cost, entry.profit, entry.reason = current.quantity, current.vendorTotal, current.cost, current.profit, current.reason
-    pending = {entry=entry, before=current.quantity, generation=generation}
+    pending = {
+        entry=entry, before=current.quantity, generation=generation,
+        moneyBefore=tonumber(GetMoney and GetMoney()) or 0,
+    }
     status:SetText(("Selling %d/%d: %s x%d"):format(queueIndex, #sellQueue, entry.name, entry.quantity))
     local ok, err = pcall(C_Container.UseContainerItem, entry.bag, entry.slot)
     if not ok then
@@ -251,11 +319,30 @@ sellNext = function()
         return
     end
     local token = generation
-    C_Timer.After(1.5, function()
+    C_Timer.After(1, function()
         if sellQueue and pending and pending.generation == token then
             confirmPending()
             if pending and pending.generation == token then
-                stopQueue("Selling stopped because the current stack did not leave the bag.")
+                local retryEntry = pending.entry
+                retryEntry.sellRetries = (tonumber(retryEntry.sellRetries) or 0) + 1
+                if retryEntry.sellRetries <= 5 then
+                    status:SetText(("Merchant throttled the queue. Retrying %s in 0.5 seconds (%d/5)..."):format(
+                        retryEntry.name or ("Item " .. retryEntry.itemID), retryEntry.sellRetries))
+                    C_Timer.After(.5, function()
+                        if sellQueue and pending and pending.entry == retryEntry and pending.generation == token then
+                            -- Give delayed bag/money events one last chance to
+                            -- confirm the original sale before issuing a retry.
+                            confirmPending()
+                            if pending and pending.entry == retryEntry and pending.generation == token then
+                                pending = nil
+                                sellNext()
+                            end
+                        end
+                    end)
+                else
+                    stopQueue("Selling stopped after five merchant retries on " ..
+                        (retryEntry.name or ("Item " .. retryEntry.itemID)) .. ".")
+                end
             end
         end
     end)
@@ -271,6 +358,15 @@ local function startQueue()
     generation = generation + 1
     refreshRows()
     sellNext()
+end
+
+local function alwaysIgnoreSelected()
+    if queueActive() or not selectedCandidate then return end
+    local itemID = selectedCandidate.itemID
+    local name = selectedCandidate.name or ("Item " .. itemID)
+    ignoreTable()[tostring(itemID)] = true
+    selectedCandidate = nil
+    refreshRows(name .. " will always be skipped.")
 end
 
 local function makeCheck(parent, label, key, anchor)
@@ -289,15 +385,21 @@ local function makeCheck(parent, label, key, anchor)
 end
 
 local function makeRow(previous, index)
-    local row = CreateFrame("Frame", nil, panel)
-    row:SetHeight(29); row:SetPoint("LEFT", 8, 0); row:SetPoint("RIGHT", -8, 0); row:SetPoint("TOP", previous, "BOTTOM")
+    local row = CreateFrame("Button", nil, panel)
+    row:SetHeight(29); row:SetPoint("LEFT", 8, 0); row:SetPoint("RIGHT", -30, 0); row:SetPoint("TOP", previous, "BOTTOM")
     local bg = row:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints(); local shade=index%2==0 and .09 or .025; bg:SetColorTexture(shade,shade,shade,.96)
+    row.Selected = row:CreateTexture(nil, "BORDER"); row.Selected:SetAllPoints(); row.Selected:SetColorTexture(.42,.24,.58,.34); row.Selected:Hide()
     local line = row:CreateTexture(nil, "BORDER"); line:SetPoint("BOTTOMLEFT"); line:SetPoint("BOTTOMRIGHT"); line:SetHeight(1); line:SetColorTexture(.31,.27,.19,.72)
     row.Icon = row:CreateTexture(nil, "ARTWORK"); row.Icon:SetSize(24,24); row.Icon:SetPoint("LEFT",2,0)
     row.Name = row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Name:SetPoint("LEFT",30,0); row.Name:SetPoint("RIGHT",-270,0); row.Name:SetJustifyH("LEFT")
     row.Quantity = row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Quantity:SetPoint("RIGHT",-235,0); row.Quantity:SetWidth(30)
     row.Reason = row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Reason:SetPoint("RIGHT",-94,0); row.Reason:SetWidth(132); row.Reason:SetJustifyH("RIGHT")
     row.Value = row:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); row.Value:SetPoint("RIGHT",-5,0); row.Value:SetWidth(84); row.Value:SetJustifyH("RIGHT")
+    row:SetScript("OnClick", function(self)
+        if queueActive() or not self.entry then return end
+        selectedCandidate = self.entry
+        refreshRows("Selected " .. (self.entry.name or ("Item " .. self.entry.itemID)) .. ".")
+    end)
     return row
 end
 
@@ -345,11 +447,18 @@ local function createPanel()
     for _,spec in ipairs({{"Qty",-235,30},{"Why",-94,132},{"Vendor",-5,84}}) do local text=header:CreateFontString(nil,"ARTWORK","GameFontNormalSmall"); text:SetPoint("RIGHT",spec[2],0); text:SetWidth(spec[3]); text:SetText(spec[1]); text:SetJustifyH("RIGHT") end
     local previous=header
     for index=1,ROWS do rows[index]=makeRow(previous,index); previous=rows[index] end
+    scrollFrame=CreateFrame("ScrollFrame","DXMMerchantSellScrollFrame",panel,"FauxScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT",header,"BOTTOMLEFT",0,0)
+    scrollFrame:SetPoint("BOTTOMRIGHT",panel,"BOTTOMRIGHT",-30,82)
+    scrollFrame:SetScript("OnVerticalScroll",function(self,offset)
+        FauxScrollFrame_OnVerticalScroll(self,offset,29,function() refreshRows(nil,true) end)
+    end)
 
     status=panel:CreateFontString(nil,"ARTWORK","GameFontHighlightSmall"); status:SetPoint("BOTTOMLEFT",10,42); status:SetPoint("RIGHT",-10,0); status:SetJustifyH("LEFT")
     sellButton=DXMTheme:CreateButton(panel); sellButton:SetSize(126,23); sellButton:SetPoint("BOTTOMLEFT",10,10); sellButton:SetText("Sell Queue"); sellButton:SetScript("OnClick",startQueue)
     stopButton=DXMTheme:CreateButton(panel); stopButton:SetSize(72,23); stopButton:SetPoint("LEFT",sellButton,"RIGHT",5,0); stopButton:SetText("Stop"); stopButton:SetScript("OnClick",function() stopQueue("Selling stopped.") end)
     local refresh=DXMTheme:CreateButton(panel); refresh:SetSize(76,23); refresh:SetPoint("LEFT",stopButton,"RIGHT",5,0); refresh:SetText("Refresh"); refresh:SetScript("OnClick",function() if not queueActive() then refreshRows() end end)
+    alwaysIgnoreButton=DXMTheme:CreateButton(panel); alwaysIgnoreButton:SetSize(126,23); alwaysIgnoreButton:SetPoint("LEFT",refresh,"RIGHT",5,0); alwaysIgnoreButton:SetText("Always Ignore"); alwaysIgnoreButton:SetScript("OnClick",alwaysIgnoreSelected)
 
     tab:SetScript("OnClick",function()
         MerchantFrame.selectedTab=4
@@ -363,12 +472,25 @@ local function createPanel()
     panel:Hide()
 end
 
+local merchantMoney
 local events=CreateFrame("Frame")
-for _,event in ipairs({"ADDON_LOADED","MERCHANT_SHOW","MERCHANT_CLOSED","BAG_UPDATE_DELAYED"}) do events:RegisterEvent(event) end
+for _,event in ipairs({"ADDON_LOADED","MERCHANT_SHOW","MERCHANT_CLOSED","BAG_UPDATE_DELAYED","PLAYER_MONEY"}) do events:RegisterEvent(event) end
 events:SetScript("OnEvent",function(_,event)
     if event=="ADDON_LOADED" then createPanel(); return end
-    if event=="MERCHANT_SHOW" then createPanel(); if panel then panel:Hide() end
-    elseif event=="MERCHANT_CLOSED" then if panel then panel:Hide() end
+    if event=="MERCHANT_SHOW" then
+        merchantMoney = tonumber(GetMoney and GetMoney()) or 0
+        createPanel(); if panel then panel:Hide() end
+    elseif event=="MERCHANT_CLOSED" then
+        merchantMoney = nil
+        if panel then panel:Hide() end
+    elseif event=="PLAYER_MONEY" then
+        local current = tonumber(GetMoney and GetMoney()) or merchantMoney or 0
+        local delta = merchantMoney and (current - merchantMoney) or 0
+        merchantMoney = current
+        if pending then confirmPending()
+        elseif recordManualVendorIncome(delta) then
+            if panel and panel:IsShown() then refreshRows("Manual merchant proceeds recorded in the Ledger.") end
+        elseif panel and panel:IsShown() and not queueActive() then refreshRows() end
     elseif event=="BAG_UPDATE_DELAYED" then
         if pending then confirmPending()
         elseif panel and panel:IsShown() and not queueActive() then refreshRows() end

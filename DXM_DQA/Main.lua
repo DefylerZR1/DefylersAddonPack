@@ -1,4 +1,4 @@
-﻿DQADB = DQADB or {}
+DQADB = DQADB or {}
 
 local frame = CreateFrame("Frame")
 local overlays = {}
@@ -7,6 +7,13 @@ local activeNameplateUnits = {}
 local activeQuestTitles = {}
 local activeObjectiveTexts = {}
 local QUEST_MARKER_NAMEPLATE_DISTANCE = 60
+
+local function markersEnabled()
+    if type(DQADB.modules) == "table" and DQADB.modules.objectiveMarkers ~= nil then
+        return DQADB.modules.objectiveMarkers ~= false
+    end
+    return DQADB.enabled ~= false
+end
 
 local function printStatus(message)
     if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
@@ -29,6 +36,7 @@ end
 
 local function applyQuestMarkerRange()
     if not GetCVar or not SetCVar then return end
+    if InCombatLockdown and InCombatLockdown() then return end
     local ok, value = pcall(GetCVar, "nameplateMaxDistance")
     local current = ok and tonumber(normalValue(value)) or nil
     if not current or current >= QUEST_MARKER_NAMEPLATE_DISTANCE then return end
@@ -40,6 +48,7 @@ end
 
 local function restoreNameplateRange()
     if DQADB.previousNameplateMaxDistance == nil or not SetCVar then return end
+    if InCombatLockdown and InCombatLockdown() then return end
     pcall(SetCVar, "nameplateMaxDistance", DQADB.previousNameplateMaxDistance)
     DQADB.previousNameplateMaxDistance = nil
 end
@@ -243,7 +252,7 @@ local function hideWorldCursorOverlay()
 end
 
 local function showWorldCursorOverlay()
-    if DQADB.enabled == false or not C_TooltipInfo or not C_TooltipInfo.GetWorldCursor then
+    if not markersEnabled() or not C_TooltipInfo or not C_TooltipInfo.GetWorldCursor then
         hideWorldCursorOverlay()
         return
     end
@@ -277,7 +286,13 @@ local function scheduleWorldCursorRefresh()
 end
 
 local function showQuestOverlay(unit)
-    if not activeNameplateUnits[unit] or DQADB.enabled == false or not isQuestObjectiveUnit(unit) then
+    if not activeNameplateUnits[unit] then
+        hideQuestOverlay(unit)
+        return
+    end
+    local questObjective = markersEnabled() and isQuestObjectiveUnit(unit)
+    local killCount = not questObjective and DQA_GetKillCountForUnit and DQA_GetKillCountForUnit(unit) or 0
+    if not questObjective and (tonumber(killCount) or 0) <= 0 then
         hideQuestOverlay(unit)
         return
     end
@@ -297,6 +312,15 @@ local function showQuestOverlay(unit)
     overlay:SetParent(UIParent)
     overlay:SetFrameStrata("TOOLTIP")
     overlay:SetFrameLevel(100)
+    if questObjective then
+        overlay.Label:SetText("QUEST OBJECTIVE")
+        overlay.Label:SetTextColor(1, .82, .18, 1)
+        overlay.Diamond:SetColorTexture(1, .82, .18, 1)
+    else
+        overlay.Label:SetText(("KILLS: %s"):format(BreakUpLargeNumbers and BreakUpLargeNumbers(killCount) or tostring(killCount)))
+        overlay.Label:SetTextColor(.79, .62, .95, 1)
+        overlay.Diamond:SetColorTexture(.79, .62, .95, 1)
+    end
     overlay:ClearAllPoints()
     overlay:SetPoint("CENTER", anchor, "CENTER", 0, 0)
     overlay:Show()
@@ -314,16 +338,13 @@ local function refreshAllNameplates()
     for unit in pairs(activeNameplateUnits) do scheduleUnitRefresh(unit) end
 end
 
-for _, event in ipairs({
-    "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD",
-    "QUEST_LOG_UPDATE", "NAME_PLATE_UNIT_ADDED", "NAME_PLATE_UNIT_REMOVED",
-    "WORLD_CURSOR_TOOLTIP_UPDATE", "TOOLTIP_DATA_UPDATE",
-}) do
-    frame:RegisterEvent(event)
+function DQA_RefreshNameplateMarkers()
+    refreshAllNameplates()
 end
-frame:SetScript("OnEvent", function(_, event, unit)
+
+local function HandleDQAEvent(event, unit)
     if event == "PLAYER_LOGIN" and DQADB.enabled == nil then DQADB.enabled = true end
-    if event == "PLAYER_LOGIN" and DQADB.enabled ~= false then applyQuestMarkerRange() end
+    if event == "PLAYER_LOGIN" and markersEnabled() then applyQuestMarkerRange() end
     if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" or event == "QUEST_LOG_UPDATE" then
         rebuildActiveQuestTitles()
     end
@@ -339,25 +360,57 @@ frame:SetScript("OnEvent", function(_, event, unit)
         refreshAllNameplates()
         scheduleWorldCursorRefresh()
     end
+end
+
+-- Assign the handler before optional event registration. Forever builds do
+-- not expose every retail tooltip event; one rejected event must not prevent
+-- the core quest-log and nameplate events from working.
+frame:SetScript("OnEvent", function(_, eventName, ...)
+    HandleDQAEvent(eventName, ...)
 end)
+for _, eventName in ipairs({
+    "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD",
+    "QUEST_LOG_UPDATE", "NAME_PLATE_UNIT_ADDED", "NAME_PLATE_UNIT_REMOVED",
+    "WORLD_CURSOR_TOOLTIP_UPDATE", "TOOLTIP_DATA_UPDATE",
+}) do
+    pcall(frame.RegisterEvent, frame, eventName)
+end
 
 SLASH_DQA1 = "/dqa"
 SlashCmdList.DQA = function(input)
     local command = (input or ""):lower():match("^%s*(%S*)")
     if command == "on" then
         DQADB.enabled = true
+        DQADB.modules = DQADB.modules or {}
+        DQADB.modules.objectiveMarkers = true
         applyQuestMarkerRange()
         printStatus("quest-objective highlighting enabled.")
         refreshAllNameplates()
         scheduleWorldCursorRefresh()
     elseif command == "off" then
         DQADB.enabled = false
+        DQADB.modules = DQADB.modules or {}
+        DQADB.modules.objectiveMarkers = false
         restoreNameplateRange()
         hideAllQuestOverlays()
         hideWorldCursorOverlay()
         printStatus("quest-objective highlighting disabled.")
     else
-        printStatus(("quest-objective highlighting is %s. Use /dqa on or /dqa off."):format(
-            DQADB.enabled == false and "off" or "on"))
+        if DQA_OpenSettings then DQA_OpenSettings() end
+    end
+end
+
+function DQA_SetObjectiveMarkersEnabled(enabled)
+    DQADB.modules = DQADB.modules or {}
+    DQADB.modules.objectiveMarkers = enabled and true or false
+    DQADB.enabled = DQADB.modules.objectiveMarkers
+    if enabled then
+        applyQuestMarkerRange()
+        refreshAllNameplates()
+        scheduleWorldCursorRefresh()
+    else
+        restoreNameplateRange()
+        hideAllQuestOverlays()
+        hideWorldCursorOverlay()
     end
 end

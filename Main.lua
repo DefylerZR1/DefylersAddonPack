@@ -154,13 +154,17 @@ marketEvents:SetScript("OnEvent", function(_, event)
 	activeAuctionMarket = event == "AUCTION_HOUSE_SHOW" and detectAuctionMarket() or nil
 end)
 
-function private:MarketIdentity()
+function private:MarketIdentity(marketOverride)
 	local realm = GetRealmName() or "Unknown Realm"
 	local realmID = type(GetRealmID) == "function" and tonumber(GetRealmID()) or 0
-	local market = activeAuctionMarket or playerMarket()
+	local market = normalizedToken(marketOverride, nil) or activeAuctionMarket or playerMarket()
 	local ruleset = foreverRuleset(realm)
 	local key = table.concat({"forever", ruleset, tostring(realmID or 0) .. "-" .. realm, market}, "::")
 	return {product = "forever", ruleset = ruleset, realm = realm, realmID = realmID or 0, market = market, key = key}
+end
+
+function private:FactionAuctionKey()
+	return private:MarketIdentity(playerMarket()).key
 end
 
 function private:AuctionKey()
@@ -189,6 +193,7 @@ function private:Booted()
 	private.DXMCore.Trigger = private.Trigger
 	private.DXMCore.AuctionKey = private.AuctionKey
 	private.DXMCore.MarketIdentity = private.MarketIdentity
+	private.DXMCore.FactionAuctionKey = private.FactionAuctionKey
 	private.DXMCore.Timeslice = private.Timeslice
 
 	private.DXMCore.Stat = parts.Statistics.NewStat

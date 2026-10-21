@@ -44,9 +44,9 @@ function DXMPriceSummary.Invalidate(quiet)
     for callback in pairs(refreshCallbacks) do pcall(callback) end
 end
 
-function DXMPriceSummary.Get(itemKey)
+function DXMPriceSummary.Get(itemKey, marketOverride)
     local key = DXMCore:ItemKeyKey(itemKey)
-    local market = DXMCore:AuctionKey()
+    local market = marketOverride or DXMCore:AuctionKey()
     local now = GetServerTime()
     local info = C_AuctionHouse.GetItemKeyInfo and C_AuctionHouse.GetItemKeyInfo(itemKey)
     local commodity = info and info.isCommodity
@@ -105,6 +105,8 @@ local events = CreateFrame("Frame")
 events:RegisterEvent("COMMODITY_SEARCH_RESULTS_UPDATED")
 events:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
 events:SetScript("OnEvent", function(_, event, item)
+    local identity = DXMCore:MarketIdentity()
+    if identity and identity.market == "neutral" then return end
     local commodity = event == "COMMODITY_SEARCH_RESULTS_UPDATED"
     local minimum
     local count = commodity and C_AuctionHouse.GetNumCommoditySearchResults(item)

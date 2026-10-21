@@ -1,6 +1,6 @@
 local _, FS = ...
 
-FS.VERSION = "0.1.6"
+FS.VERSION = "0.1.8"
 FS.PAGE_SIZE = 11
 
 FS.categories = {
@@ -18,8 +18,8 @@ FS.settings = {
     { category="rendering", cvar="shadowMode", raid="RAIDshadowMode", label="Shadow mode", min=0, max=6, step=1 },
     { category="rendering", cvar="shadowTextureSize", raid="RAIDshadowTextureSize", label="Shadow texture size", min=512, max=8192, step=256, reload=true },
     { category="rendering", cvar="graphicsLightMode", raid="raidGraphicsLightMode", label="Lighting mode", min=0, max=4, step=1 },
-    { category="rendering", cvar="giQuality", raid="RAIDgiQuality", label="Global illumination", min=1, max=4, step=1,
-      help="Values 0 and 5 are blocked because both trigger the GI cascade assertion on build 1.60.1.69893." },
+    { category="rendering", cvar="giQuality", raid="RAIDgiQuality", label="Global illumination (safe)", min=2, max=2, step=1,
+      help="Locked to the confirmed-stable value 2. Other persisted values can prevent the client from entering the world." },
 
     { category="world", cvar="farclip", raid="RAIDfarclip", label="View distance", min=500, max=20000, step=100 },
     { category="world", cvar="horizonStart", raid="RAIDhorizonStart", label="Horizon start", min=0, max=10000, step=100 },
@@ -48,6 +48,28 @@ FS.toggleSettings = {
     { cvar="volumeFog", label="Enable fog" },
 }
 
+-- Changing these values while the world renderer is starting can crash the
+-- 1.60.1 client inside its lighting engine. Keep them visible for readback,
+-- but never write them from addon code.
+local UNSAFE_LIGHTING_CVARS = {
+    giQuality=true, RAIDgiQuality=true,
+    graphicsLightMode=true, raidGraphicsLightMode=true,
+}
+
+local function SanitizeStoredLightingProfile()
+    for _, field in ipairs({"profile", "initialSnapshot"}) do
+        local values=ForeverSettingsDB and ForeverSettingsDB[field]
+        if type(values)=="table" then
+            values.giQuality=2
+            values.RAIDgiQuality=2
+            -- Never replay an old addon-selected lighting mode.
+            values.graphicsLightMode=nil
+            values.raidGraphicsLightMode=nil
+        end
+    end
+    if ForeverSettingsDB then ForeverSettingsDB.lightingSafetyVersion=1 end
+end
+
 local function GetInfo(name)
     if not C_CVar or not C_CVar.GetCVarInfo then return nil end
     local result = { pcall(C_CVar.GetCVarInfo, name) }
@@ -63,6 +85,9 @@ function FS:GetValue(name)
 end
 
 function FS:GetAvailability(name)
+    if UNSAFE_LIGHTING_CVARS[name] then
+        return false, "Locked: crashes the 1.60.1 lighting engine"
+    end
     local value, defaultValue, locked, secure, readOnly = GetInfo(name)
     if value == nil then return false, "Unavailable in this client" end
     if locked then return false, "Locked by the client" end
@@ -72,10 +97,7 @@ function FS:GetAvailability(name)
 end
 
 function FS:SetValue(name, value)
-    if name == "giQuality" or name == "RAIDgiQuality" then
-        local numericValue = tonumber(value)
-        if numericValue and (numericValue < 1 or numericValue > 4) then value = 4 end
-    end
+    if UNSAFE_LIGHTING_CVARS[name] then return false, "Unsafe lighting CVar" end
     local available, reason = self:GetAvailability(name)
     if not available then return false, reason end
     local callWorked, success = pcall(C_CVar.SetCVar, name, tostring(value))
@@ -87,13 +109,6 @@ function FS:SetValue(name, value)
         return true, string.format("Clamped to %s", tostring(actual)), actual
     end
     return true, "Applied", actual
-end
-
-function FS:EnforceSafeGIQuality()
-    for _, name in ipairs({"giQuality", "RAIDgiQuality"}) do
-        local value = self:GetValue(name)
-        if value and value ~= 4 then self:SetValue(name, 4) end
-    end
 end
 
 function FS:ReadProfile()
@@ -168,23 +183,12 @@ function ForeverSettings_ApplySavedProfile()
     return FS:ApplySavedProfile()
 end
 
-local restoreGeneration = 0
-local function ScheduleProfileRestore()
-    restoreGeneration = restoreGeneration + 1
-    local generation = restoreGeneration
-    for _, delay in ipairs({0, 0.5, 2}) do
-        C_Timer.After(delay, function()
-            if generation == restoreGeneration then FS:ApplySavedProfile() end
-        end)
-    end
-end
-
 local initialized = false
 
 local function Initialize()
     if initialized then return end
     ForeverSettingsDB = type(ForeverSettingsDB) == "table" and ForeverSettingsDB or {}
-    FS:EnforceSafeGIQuality()
+    SanitizeStoredLightingProfile()
     if ForeverSettingsDB.linkRaid == nil then ForeverSettingsDB.linkRaid = true end
     if not ForeverSettingsDB.initialSnapshot then ForeverSettingsDB.initialSnapshot = FS:ReadProfile() end
     FS:EnsureProfile()
@@ -198,13 +202,4 @@ end
 
 local events = CreateFrame("Frame")
 events:RegisterEvent("VARIABLES_LOADED")
-events:RegisterEvent("PLAYER_LOGIN")
-events:RegisterEvent("PLAYER_ENTERING_WORLD")
-events:SetScript("OnEvent", function(_, event)
-    if event == "VARIABLES_LOADED" then
-        Initialize()
-        return
-    end
-    if not initialized then return end
-    ScheduleProfileRestore()
-end)
+events:SetScript("OnEvent", Initialize)

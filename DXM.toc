@@ -9,7 +9,7 @@
 ## SavedVariables: DXMConfig, DXMData, DXMServers, DXMVendorPrices, DXMShoppingList, DXMLedgerData
 ## SavedVariablesPerCharacter: DXMLocal
 ##
-## Version: 0.14.86
+## Version: 0.14.95
 ## Revision: $Id$
 ## Author: DefylerZR1
 ## X-Part-Of: DXM
@@ -39,3 +39,4 @@ Register.lua
 
 ## Load up any of our active modules now.
 Modules\Active.xml
+Modules\DQALoader.lua

@@ -117,15 +117,12 @@ local function OpenDDQ()
     end
 end
 
-local function ToggleDQA()
-    if not (SlashCmdList and SlashCmdList.DQA) then
-        SetStatus("Defyler's Quest Assistance is not loaded.", true)
-        return
+local function OpenDQASettings()
+    if DQA_OpenSettings then
+        CloseAndRun(DQA_OpenSettings)
+    else
+        SetStatus("Defyler's Quest Assistance settings are unavailable.", true)
     end
-    DQADB = type(DQADB) == "table" and DQADB or {}
-    SlashCmdList.DQA(DQADB.enabled == false and "on" or "off")
-    SetStatus("Quest Assistance " .. (DQADB.enabled == false and "disabled." or "enabled."))
-    RefreshModuleRows()
 end
 
 local MODULES = {
@@ -133,7 +130,7 @@ local MODULES = {
     {addon = "DefylerDamageMeter", name = "Damage Meter", action = "Settings", open = OpenDamageMeterSettings},
     {addon = "DXM", name = "DXM Exchange", action = "Settings", open = function() OpenDXMPage("config", "DXM settings") end},
     {addon = "DXM_DDQ", name = "Disenchant Queue", action = "Open", open = OpenDDQ},
-    {addon = "DXM_DQA", name = "Quest Assistance", action = "Toggle", open = ToggleDQA},
+    {addon = "DXM_DQA", name = "Quest Assistance", action = "Settings", open = OpenDQASettings},
     {addon = "DXM_DealFinder", name = "Deal Finder", action = "Open", open = function() OpenDXMPage("deals", "Deal Finder") end},
     {addon = "DXM_Stats_OverTime", name = "Market History", action = "Open", open = function() OpenDXMPage("valuation", "Market History") end},
     {addon = "DXM_SharedData", name = "DXM Network", action = "Open", open = function() OpenDXMPage("network", "DXM Network") end},
@@ -148,11 +145,11 @@ RefreshModuleRows = function()
         local version = AddOnVersion(definition.addon)
         local state = isLoaded and "Loaded" or "Unavailable"
         if definition.addon == "DXM_DQA" and isLoaded and type(DQADB) == "table" then
-            state = DQADB.enabled == false and "Off" or "On"
-            row.Action:SetText(DQADB.enabled == false and "Enable" or "Disable")
-        else
-            row.Action:SetText(definition.action)
+            local markerOn = not DQADB.modules or DQADB.modules.objectiveMarkers ~= false
+            local secretsOn = not DQADB.modules or DQADB.modules.secrets ~= false
+            state = (markerOn or secretsOn) and "Configured" or "Off"
         end
+        row.Action:SetText(definition.action)
         row.State:SetText((version and ("v" .. version .. "  ") or "") .. state)
         row.State:SetTextColor(isLoaded and .45 or .65, isLoaded and .82 or .36, isLoaded and .56 or .36)
         row.Action:SetEnabled(isLoaded and not definition.current and definition.open ~= nil)

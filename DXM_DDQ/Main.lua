@@ -11,11 +11,13 @@ local status
 local sessionSummary
 local sessionDetail
 local session = {items=0, materialValue=0, knownCost=0, knownProfit=0, complete=0, incomplete=0}
+local skippedCandidates = {}
 
 -- DXM_Salvager stored its settings in a differently named SavedVariables file.
 -- The installer copies that file once so this bridge can retain existing state.
 DXMDDQDB = DXMDDQDB or DXMSalvagerDB or {}
 DXMSalvagerDB = nil
+DXMDDQDB.alwaysSkip = DXMDDQDB.alwaysSkip or {}
 
 local function containerSlots(bag)
     if C_Container and C_Container.GetContainerNumSlots then return C_Container.GetContainerNumSlots(bag) or 0 end
@@ -83,6 +85,12 @@ local function findCandidate()
     for bag = 0, (NUM_BAG_SLOTS or 4) do
         for slot = 1, containerSlots(bag) do
             local link, count, locked, itemID, quality, icon = containerInfo(bag, slot)
+            local skipKey = bag .. ":" .. slot
+            local skipped = skippedCandidates[skipKey]
+            if skipped and skipped ~= (link or itemID) then
+                skippedCandidates[skipKey] = nil
+                skipped = nil
+            end
             if (link or itemID) and not locked and (tonumber(count) or 1) == 1 then
                 local eligible, info
                 if DXMSalvage and DXMSalvage.CanDisenchant then
@@ -91,7 +99,7 @@ local function findCandidate()
                 if not eligible then
                     eligible, info = bagItemCanDisenchant(link, itemID, quality, icon)
                 end
-                if eligible then
+                if eligible and not skipped then
                     return {bag=bag,slot=slot,link=link or (info and info.link),info=info}
                 end
             end
@@ -264,6 +272,16 @@ action:RegisterForClicks("LeftButtonUp")
 action:SetAttribute("useOnKeyDown", false)
 action:SetText("Disenchant")
 
+local skip = CreateFrame("Button", "DXMDDQSkipButton", frame, "UIPanelButtonTemplate")
+skip:SetSize(54, 28)
+skip:SetPoint("BOTTOMLEFT", 18, 14)
+skip:SetText("Skip")
+
+local alwaysSkip = CreateFrame("Button", "DXMDDQAlwaysSkipButton", frame, "UIPanelButtonTemplate")
+alwaysSkip:SetSize(82, 28)
+alwaysSkip:SetPoint("BOTTOM", frame, "BOTTOM", 0, 14)
+alwaysSkip:SetText("Always Skip")
+
 local sessionPanel = CreateFrame("Frame", nil, frame, "InsetFrameTemplate")
 sessionPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 24, -220)
 sessionPanel:SetPoint("RIGHT", frame, "RIGHT", -24, 0)
@@ -299,6 +317,8 @@ local function clearAction(message)
         action:SetAttribute("macrotext", nil)
     end
     action:Disable()
+    skip:Disable()
+    alwaysSkip:Disable()
 end
 
 local function applyCandidate(candidate)
@@ -317,6 +337,8 @@ local function applyCandidate(candidate)
     action:SetAttribute("target-bag", candidate.bag)
     action:SetAttribute("target-slot", candidate.slot)
     action:Enable()
+    skip:Enable()
+    alwaysSkip:Enable()
 end
 
 local function refresh()
@@ -332,7 +354,23 @@ local function refresh()
     if lootOpen then clearAction("Loot the enchanting materials to continue."); return end
     if not knowsDisenchant() then clearAction("This character does not know Disenchant."); return end
     if not spellName() then clearAction("Disenchant spell data is still loading."); return end
-    applyCandidate(findCandidate())
+    local ok, candidate = pcall(findCandidate)
+    if not ok then
+        clearAction("DDQ bag scan failed: " .. tostring(candidate))
+        return
+    end
+    pcall(function()
+        while candidate do
+            local itemID = candidate.info and candidate.info.itemID
+            if not itemID and type(candidate.link) == "string" then
+                itemID = tonumber(candidate.link:match("item:(%d+)"))
+            end
+            if not itemID or not DXMDDQDB.alwaysSkip[itemID] then break end
+            skippedCandidates[candidate.bag .. ":" .. candidate.slot] = candidate.link or itemID
+            candidate = findCandidate()
+        end
+    end)
+    applyCandidate(candidate)
 end
 
 action:SetScript("PostClick", function()
@@ -344,12 +382,57 @@ action:SetScript("PostClick", function()
         pendingGeneration = pendingGeneration + 1
         local generation = pendingGeneration
         C_Timer.After(10, function()
-            if generation == pendingGeneration then disenchantPending = false end
+            if generation ~= pendingGeneration then return end
+            disenchantPending = false
+            local pendingBag = currentCandidate and currentCandidate.bag
+            local pendingSlot = currentCandidate and currentCandidate.slot
+            refresh()
+            if currentCandidate and currentCandidate.bag == pendingBag and currentCandidate.slot == pendingSlot then
+                status:SetText("Disenchant did not complete. Click Disenchant to try this item again, or Skip it.")
+            end
         end)
         status:SetText("Disenchanting. The next item will load after your bags update.")
         -- Do not mutate the protected button while its secure click is still
         -- being processed. BAG_UPDATE_DELAYED/LOOT_CLOSED refresh it safely.
     end
+end)
+
+skip:SetScript("OnClick", function()
+    if not currentCandidate then return end
+    if InCombatLockdown and InCombatLockdown() then
+        status:SetText("DDQ cannot change the protected disenchant target during combat.")
+        return
+    end
+    local skippedName = currentCandidate.info and currentCandidate.info.name or currentCandidate.link or "item"
+    skippedCandidates[currentCandidate.bag .. ":" .. currentCandidate.slot] = currentCandidate.link
+        or (currentCandidate.info and currentCandidate.info.itemID)
+    refresh()
+    if currentCandidate then
+        status:SetText(("Skipped %s for this DDQ session. One click processes the next item."):format(skippedName))
+    else
+        status:SetText(("Skipped %s. Close and reopen DDQ to reset skipped items."):format(skippedName))
+    end
+end)
+
+alwaysSkip:SetScript("OnClick", function()
+    if not currentCandidate then return end
+    if InCombatLockdown and InCombatLockdown() then
+        status:SetText("DDQ cannot change the protected disenchant target during combat.")
+        return
+    end
+    local info = currentCandidate.info
+    local itemID = info and info.itemID
+    if not itemID and type(currentCandidate.link) == "string" then
+        itemID = tonumber(currentCandidate.link:match("item:(%d+)"))
+    end
+    if not itemID then
+        status:SetText("DDQ could not identify this item. Use Skip for this session.")
+        return
+    end
+    local skippedName = (info and info.name) or currentCandidate.link or ("Item " .. itemID)
+    DXMDDQDB.alwaysSkip[itemID] = skippedName
+    refresh()
+    status:SetText(("Always skipping %s. Use /ddq reset-skips to clear the saved list."):format(skippedName))
 end)
 
 local function setProfessionPortraitShown(professionFrame, shown)
@@ -371,6 +454,7 @@ frame:SetScript("OnShow", function()
 end)
 frame:SetScript("OnHide", function()
     DXMDDQDB.shown = false
+    wipe(skippedCandidates)
     if frame.openedFromProfession then
         local professionFrame = frame:GetParent()
         if professionFrame then setProfessionPortraitShown(professionFrame, true) end
@@ -497,7 +581,11 @@ local function placeStandalone()
     icon:ClearAllPoints()
     icon:SetPoint("TOPLEFT", 18, -42)
     action:ClearAllPoints()
-    action:SetPoint("BOTTOMRIGHT", -18, 14)
+    action:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 18, 14)
+    skip:ClearAllPoints()
+    skip:SetPoint("LEFT", action, "RIGHT", 4, 0)
+    alwaysSkip:ClearAllPoints()
+    alwaysSkip:SetPoint("LEFT", skip, "RIGHT", 4, 0)
 end
 
 local function showStandalone()
@@ -532,7 +620,11 @@ local function placeInProfessions(professionsFrame)
     icon:ClearAllPoints()
     icon:SetPoint("TOPLEFT", 30, -88)
     action:ClearAllPoints()
-    action:SetPoint("TOPLEFT", frame, "TOPLEFT", 30, -178)
+    skip:ClearAllPoints()
+    action:SetPoint("TOPLEFT", frame, "TOPLEFT", 18, -178)
+    skip:SetPoint("LEFT", action, "RIGHT", 4, 0)
+    alwaysSkip:ClearAllPoints()
+    alwaysSkip:SetPoint("LEFT", skip, "RIGHT", 4, 0)
 end
 
 local mailTab
@@ -578,7 +670,11 @@ local function placeInMailbox(mailFrame)
     icon:ClearAllPoints()
     icon:SetPoint("TOPLEFT",24,-88)
     action:ClearAllPoints()
-    action:SetPoint("TOPLEFT",frame,"TOPLEFT",24,-178)
+    skip:ClearAllPoints()
+    action:SetPoint("TOPLEFT",frame,"TOPLEFT",18,-178)
+    skip:SetPoint("LEFT",action,"RIGHT",4,0)
+    alwaysSkip:ClearAllPoints()
+    alwaysSkip:SetPoint("LEFT",skip,"RIGHT",4,0)
 end
 
 local function updateMailTab()
@@ -771,7 +867,13 @@ end)
 
 SLASH_DXMDDQ1 = "/ddq"
 SLASH_DXMDDQ2 = "/dxmddq"
-SlashCmdList.DXMDDQ = function()
+SlashCmdList.DXMDDQ = function(message)
+    if strtrim(message or ""):lower() == "reset-skips" then
+        wipe(DXMDDQDB.alwaysSkip)
+        print("DDQ: cleared the Always Skip list.")
+        refresh()
+        return
+    end
     if frame:IsShown() then frame:Hide() else showStandalone() end
 end
 

@@ -44,12 +44,19 @@ local explicitFrames = {
     "MacroFrame",
     "AddonList",
     "ObjectiveTrackerFrame",
+    "Questie_BaseFrame",
     "MinimapCluster",
 }
 
 local specialManagedFrames = {
     ObjectiveTrackerFrame = true,
     MinimapCluster = true,
+}
+
+-- Addon frames that deliberately omit Blizzard window chrome but still need
+-- DUI move and resize controls. These use normal frame geometry methods.
+local alwaysManagedFrames = {
+    Questie_BaseFrame = true,
 }
 
 -- Blizzard refreshes managed panel positions during tradeskill updates. Once
@@ -345,6 +352,13 @@ local function CreateTitleHandle(frame)
         handle:SetPoint("BOTTOMRIGHT", frame.BorderTop, "BOTTOMRIGHT", 4, -4)
         handle:SetFrameStrata("DIALOG")
         handle:SetFrameLevel(10000)
+    elseif FrameKey(frame) == "Questie_BaseFrame" then
+        -- Questie's title is a child button and may be locked by Questie's own
+        -- settings. Put DUI's drag surface directly over the visible header.
+        handle:SetPoint("TOPLEFT", frame, "TOPLEFT", 4, -1)
+        handle:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -1)
+        handle:SetHeight(28)
+        handle:SetFrameLevel(math.min(10000, frame:GetFrameLevel() + 900))
     else
         handle:SetPoint("TOPLEFT", frame, "TOPLEFT", 42, -1)
         handle:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -1)
@@ -475,9 +489,10 @@ local function IsCandidate(frame)
     local name = FrameKey(frame)
     if not name or ignored[name] then return false end
     if not GeometrySupported(frame) then return false end
-    if frame:GetParent() ~= UIParent and not specialManagedFrames[name] then return false end
-    if not specialManagedFrames[name] and (frame:GetWidth() < 220 or frame:GetHeight() < 120) then return false end
-    return specialManagedFrames[name] or HasWindowChrome(frame, name)
+    if frame:GetParent() ~= UIParent and not specialManagedFrames[name] and not alwaysManagedFrames[name] then return false end
+    if not specialManagedFrames[name] and not alwaysManagedFrames[name]
+        and (frame:GetWidth() < 220 or frame:GetHeight() < 120) then return false end
+    return specialManagedFrames[name] or alwaysManagedFrames[name] or HasWindowChrome(frame, name)
 end
 
 local function Manage(frame)
@@ -490,12 +505,17 @@ local function Manage(frame)
     SetAppropriateClamping(frame)
     CreateTitleHandle(frame)
     CreateResizeGrip(frame)
-    InstallPersistenceGuards(frame)
     frame:HookScript("OnShow", function(self)
         if not Database().enabled then return end
-        RestoreFrameThroughStartup(self)
+        C_Timer.After(0, function()
+            if self:IsShown() then RestoreFrame(self) end
+        end)
     end)
-    if Database().frames[FrameKey(frame)] then RestoreFrameThroughStartup(frame) end
+    if Database().frames[FrameKey(frame)] then
+        C_Timer.After(0, function()
+            if frame:IsShown() then RestoreFrame(frame) end
+        end)
+    end
 end
 
 local function ScanWindows()
@@ -565,9 +585,20 @@ function DefylerUI_ReflowAfterGlobalScale()
 end
 
 local function PositionMinimapButton(button)
-    local angle = math.rad(Database().minimapAngle or 225)
+    local db = Database()
+    -- Keep the launcher outside resized minimaps and away from other buttons.
+    if db.minimapAngle == nil or db.minimapAngle == 225 then
+        db.minimapAngle = 180
+    end
+    local angle = math.rad(db.minimapAngle)
+    local radiusX = ((Minimap:GetWidth() or 140) * 0.5) + 10
+    local radiusY = ((Minimap:GetHeight() or 140) * 0.5) + 10
     button:ClearAllPoints()
-    button:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * 82, math.sin(angle) * 82)
+    button:SetPoint(
+        "CENTER", Minimap, "CENTER",
+        math.cos(angle) * radiusX,
+        math.sin(angle) * radiusY
+    )
 end
 
 local function UpdateMinimapButtonDrag(button)
@@ -679,11 +710,6 @@ local function ContainerAnchorsUpdated()
     end
 end
 
-if hooksecurefunc then
-    hooksecurefunc("ShowUIPanel", ScheduleRestoreShownWindows)
-    hooksecurefunc("UpdateUIPanelPositions", ScheduleRestoreShownWindows)
-end
-
 local eventFrame = CreateFrame("Frame")
 eventFrame:RegisterEvent("VARIABLES_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
@@ -720,10 +746,6 @@ eventFrame:SetScript("OnUpdate", function(_, delta)
     if elapsed < RESCAN_SECONDS then return end
     elapsed = 0
     ScanWindows()
-    -- Native AccountData/layout updates can bypass Lua SetPoint hooks. This is
-    -- a cheap drift check; RestoreFrame performs no writes when geometry
-    -- already matches the saved record.
-    RestoreShownWindows()
 end)
 
 SLASH_DEFYLERUI1 = "/dui"

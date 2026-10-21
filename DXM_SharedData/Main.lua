@@ -32,6 +32,23 @@ local function ensureTables()
     if type(DXMSharedImport.realms) ~= "table" then DXMSharedImport.realms = {} end
 end
 
+local function purgeNeutralObservations()
+    ensureTables()
+    for _, store in ipairs({DXMSharedExport.queue, DXMSharedExport.archive}) do
+        for key, record in pairs(store) do
+            if type(record) == "string" and record:sub(1, 4) == PREFIX .. "|" then
+                local _, _, _, _, _, _, market = strsplit("|", record)
+                if tostring(market):lower() == "neutral" then store[key] = nil end
+            end
+        end
+    end
+    for key in pairs(DXMSharedImport.markets) do
+        if type(key) == "string" and key:match("::neutral$") then
+            DXMSharedImport.markets[key] = nil
+        end
+    end
+end
+
 local function clean(value)
     return tostring(value or ""):gsub("[%c|]", "_")
 end
@@ -163,6 +180,7 @@ function DXMQueueSaleObservation(itemID, quantity, proceeds, costBasis, captured
 end
 function Module:Boot(hook)
     ensureTables()
+    purgeNeutralObservations()
     hook(Const.ScannerItemsCompleted, Module.ScannerItemsCompleted)
     hook(Const.AuctionHouseOpened, Module.AuctionHouseOpened)
     hook(Const.AuctionHouseClosed, Module.AuctionHouseClosed)
@@ -173,6 +191,10 @@ function Module:ScannerItemsCompleted(items)
     ensureTables()
     local capturedAt = GetServerTime()
     local identity = DXMCore:MarketIdentity()
+    if identity and identity.market == "neutral" then
+        self:UpdateDashboard()
+        return
+    end
     local marketKey = clean(identity.key)
     local queued = queueSize()
 

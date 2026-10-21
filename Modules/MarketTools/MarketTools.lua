@@ -86,24 +86,35 @@ end
 local function materialMarketValue(itemID, allowHistory)
     itemID = tonumber(itemID)
     if not itemID then return end
+    local identity = DXMCore:MarketIdentity()
+    local neutralMarket = identity and identity.market == "neutral"
     local cached = not allowHistory and materialPriceCache[itemID]
     if cached then return cached.value or nil, cached.samples end
 
     -- Salvage purchase decisions use the current completed browse scan. A
     -- tooltip may fall back to persisted market observations when that scan
-    -- did not include the material.
-    local value = tonumber(currentMaterialPrices[itemID])
-    local samples = tonumber(currentMaterialQuantities[itemID]) or 0
-    if not value and allowHistory and DXMPriceSummary and DXMPriceSummary.Get then
+    -- did not include the material. Neutral AH equipment is still evaluated
+    -- at its neutral buyout, but its disenchant outputs must use the player's
+    -- faction market. Neutral enchanting-material listings must never inflate
+    -- a Salvage purchase limit.
+    local value = not neutralMarket and tonumber(currentMaterialPrices[itemID]) or nil
+    local samples = not neutralMarket and (tonumber(currentMaterialQuantities[itemID]) or 0) or 0
+    if not value and (allowHistory or neutralMarket) and DXMPriceSummary and DXMPriceSummary.Get then
+        local materialMarket = neutralMarket and DXMCore:FactionAuctionKey() or nil
         local summary = DXMPriceSummary.Get({
             itemID = itemID,
             itemLevel = 0,
             itemSuffix = 0,
             battlePetSpeciesID = 0,
-        })
+        }, materialMarket)
         if summary then
-            value = tonumber(summary.average24) or tonumber(summary.average7) or tonumber(summary.latest)
-            samples = tonumber(summary.count24) or tonumber(summary.count7) or 0
+            if tonumber(summary.average24) then
+                value, samples = tonumber(summary.average24), tonumber(summary.count24) or 0
+            elseif tonumber(summary.average7) then
+                value, samples = tonumber(summary.average7), tonumber(summary.count7) or 0
+            else
+                value, samples = tonumber(summary.latest), 0
+            end
         end
     end
     if not allowHistory then
@@ -135,7 +146,7 @@ local function itemInfo(item)
         level = itemLevel > 0 and itemLevel or info.level,
         itemType = info.itemType, itemSubType = info.itemSubType, maxStack = info.maxStack,
         equipLoc = info.equipLoc, icon = (display and display.icon) or info.icon, vendor = info.vendor,
-        classID = info.classID, buyout = tonumber(item.itemData and item.itemData.minPrice) or 0,
+        classID = info.classID, subclassID = info.subclassID, buyout = tonumber(item.itemData and item.itemData.minPrice) or 0,
         browseResult = item.itemData,
     }
 end
@@ -152,6 +163,7 @@ local MATERIALS = {
 
 local WEAPON_CLASS = Enum and Enum.ItemClass and Enum.ItemClass.Weapon or 2
 local ARMOR_CLASS = Enum and Enum.ItemClass and Enum.ItemClass.Armor or 4
+local WAND_SUBCLASS = Enum and Enum.ItemWeaponSubclass and Enum.ItemWeaponSubclass.Wand or 19
 
 local EQUIPMENT_SLOTS = {
     INVTYPE_2HWEAPON=true, INVTYPE_WEAPON=true, INVTYPE_WEAPONMAINHAND=true,
@@ -242,15 +254,15 @@ local DISENCHANT_TABLE = {
 }
 
 salvageItemInfo = function(item)
-    local name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(item)
+    local name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID, subclassID = C_Item.GetItemInfo(item)
     local getter = C_Item.GetItemInfoInstant or GetItemInfoInstant
-    local itemID, instantType, instantSubType, instantEquipLoc, instantIcon, instantClassID
+    local itemID, instantType, instantSubType, instantEquipLoc, instantIcon, instantClassID, instantSubclassID
     if getter then
-        itemID, instantType, instantSubType, instantEquipLoc, instantIcon, instantClassID = getter(item)
+        itemID, instantType, instantSubType, instantEquipLoc, instantIcon, instantClassID, instantSubclassID = getter(item)
     end
     itemID = tonumber(itemID) or tonumber(item)
     if not name and itemID and item ~= itemID then
-        name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID = C_Item.GetItemInfo(itemID)
+        name, link, quality, level, _, itemType, itemSubType, maxStack, equipLoc, icon, vendor, classID, subclassID = C_Item.GetItemInfo(itemID)
     end
     if not name then
         if itemID and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(itemID) end
@@ -264,8 +276,9 @@ salvageItemInfo = function(item)
     equipLoc = instantEquipLoc and instantEquipLoc ~= "" and instantEquipLoc or equipLoc
     icon = instantIcon or icon
     classID = tonumber(instantClassID) or tonumber(classID)
+    subclassID = tonumber(instantSubclassID) or tonumber(subclassID)
     return {itemID=itemID,name=name,link=link,quality=quality or 1,level=level or 0,itemType=itemType,
-        itemSubType=itemSubType,maxStack=maxStack or 1,equipLoc=equipLoc,icon=icon,vendor=vendor or 0,classID=classID},itemID
+        itemSubType=itemSubType,maxStack=maxStack or 1,equipLoc=equipLoc,icon=icon,vendor=vendor or 0,classID=classID,subclassID=subclassID},itemID
 end
 
 local function salvageYield(info, referenceOnly)
@@ -1019,9 +1032,17 @@ local function process(items)
                 if value and value>info.buyout then
                     dealResults[#dealResults+1]={itemID=info.itemID,sequence=#dealResults+1,name=info.name,link=info.link,icon=info.icon,quality=info.quality,buyout=info.buyout,value=value,profit=value-info.buyout,roi=(value-info.buyout)/info.buyout*100,samples=samples,browseResult=info.browseResult,detail=detail}
                 end
-                local salvage,outputs,missing,observedAttempts=salvageValue(info)
+                -- Blizzard only recently enabled wand disenchanting on this
+                -- client, and its live yields do not match the legacy table.
+                -- Keep wands out of Salvager purchasing while DDQ continues to
+                -- collect observations that can support a future model.
+                local salvageAllowed = not (info.classID == WEAPON_CLASS and info.subclassID == WAND_SUBCLASS)
+                local salvage,outputs,missing,observedAttempts
+                if salvageAllowed then
+                    salvage,outputs,missing,observedAttempts=salvageValue(info)
+                end
                 if missing then salvageMissingMaterials[missing:gsub("^Missing price for ", "")] = true end
-                local possible=possibleSalvageOutputs(info)
+                local possible=salvageAllowed and possibleSalvageOutputs(info) or {}
                 if next(possible) then
                     local basis=observedAttempts and ("Observed from %d disenchant%s: "):format(observedAttempts,observedAttempts==1 and "" or "s") or "Reference estimate: "
                     salvageResults[#salvageResults+1]={itemID=info.itemID,itemKey=info.itemKey,itemLevel=info.level,sequence=#salvageResults+1,name=info.name,link=info.link,icon=info.icon,quality=info.quality,buyout=info.buyout,maximumBuyout=info.buyout,value=salvage,purchaseLimit=salvage,profit=salvage and salvage-info.buyout or nil,roi=salvage and (salvage-info.buyout)/info.buyout*100 or nil,browseResult=info.browseResult,detail=basis..(outputs or missing or "No valuation available"),observedAttempts=observedAttempts,possibleOutputs=possible}
@@ -1106,7 +1127,20 @@ local function showValuation(itemID)
         valuationText:SetText("Item data is loading...")
         return
     end
-    local value, samples = marketValue(itemID, 1)
+    local value, samples
+    if DXMPriceSummary and DXMPriceSummary.Get then
+        local summary = DXMPriceSummary.Get({
+            itemID = itemID,
+            itemLevel = 0,
+            itemSuffix = 0,
+            battlePetSpeciesID = 0,
+        })
+        if summary then
+            value = tonumber(summary.average24) or tonumber(summary.average7) or tonumber(summary.latest)
+            samples = tonumber(summary.count24) or tonumber(summary.count7) or 0
+        end
+    end
+    if not value then value, samples = marketValue(itemID, 1) end
     local color = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[quality or 1]
     local hex = color and color.hex or "ffffffff"
     valuationText:SetText(table.concat({
@@ -1114,8 +1148,8 @@ local function showValuation(itemID)
         "Vendor: " .. money(vendor),
         "DXM market value: " .. (value and money(value) or "No history yet"),
         "Historical samples: " .. (samples or 0), "",
-        "Pricing: median of available DXM sources,",
-        "using the conservative 15th percentile."
+        "Pricing: 24-hour average, then 7-day average/latest,",
+        "with legacy DXM statistics used as a fallback."
     }, "\n"))
 end
 

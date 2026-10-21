@@ -127,6 +127,8 @@ end
 
 function Module:ScannerItemsCompleted(items)
     if channelID() == 0 then return end
+    local identity = DXMCore:MarketIdentity()
+    if identity and identity.market == "neutral" then return end
     local capturedAt = GetServerTime()
     local prefix = "D2|" .. capturedAt .. "|" .. DXMCore:AuctionKey() .. "|"
     local payload = prefix

@@ -3,11 +3,11 @@
 ## Notes: Defyler's Quest Assistance marks targeted quest objectives.
 ##
 ## Interface: 16001
-## LoadOnDemand: 0
+## DefaultState: enabled
 ## Dependencies: DXM_Loader
 ## SavedVariables: DQADB
 ##
-## Version: 0.1.16
+## Version: 0.2.52
 ## Author: DefylerZR1
 ## X-Part-Of: DXM
 ## X-Category: Quests
@@ -16,5 +16,10 @@
 ## X-Feedback: https://defyler.dev/
 ##
 
+Data.lua
+Bootstrap.lua
 Main.lua
+Secrets.lua
+KillCounter.lua
+Settings.lua
 

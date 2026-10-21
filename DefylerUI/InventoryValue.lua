@@ -56,42 +56,24 @@ local function estimate()
     return result
 end
 
-local footer,label,summary,queued
-local priceRefreshRegistered
-local function tooltip()
-    if not footer or not summary then return end
-    GameTooltip:SetOwner(footer,"ANCHOR_TOPLEFT")
-    GameTooltip:AddLine("Estimated inventory value",1,.82,0)
-    GameTooltip:AddDoubleLine("Auction estimate",money(summary.auction),1,1,1,1,1,1)
-    GameTooltip:AddDoubleLine("Vendor fallback",money(summary.vendor),1,1,1,1,1,1)
-    GameTooltip:AddDoubleLine("Disenchant fallback",money(summary.disenchant),1,1,1,1,1,1)
-    GameTooltip:AddLine("Backpack, carried bags and reagent bag. Excludes equipped items, bank and wallet.",.75,.75,.75,true)
-    GameTooltip:AddLine("Auction values use latest filtered DXM unit prices, then 24-hour/7-day averages. Gross estimates before fees; not guaranteed sale proceeds.",.75,.75,.75,true)
-    GameTooltip:AddLine("Non-auctionable items use the higher vendor or estimated disenchant value. Disenchant value assumes the item can be disenchanted and suitable skill is available.",.75,.75,.75,true)
-    if summary.fallback>0 then GameTooltip:AddLine(summary.fallback.." units lack auction pricing or confirmed eligibility; fallback used.",1,.65,.2,true) end
-    if summary.missing>0 then GameTooltip:AddLine(summary.missing.." units have no positive value estimate.",1,.65,.2,true) end
-    if summary.pending>0 then GameTooltip:AddLine(summary.pending.." units are waiting for item data.",1,.65,.2,true) end
-    GameTooltip:Show()
+local summary={total=0,auction=0,vendor=0,disenchant=0,missing=0,pending=0,fallback=0,units=0}
+local queued,priceRefreshRegistered=false,false
+local listeners={}
+
+DefylerUIInventoryValue={}
+function DefylerUIInventoryValue.GetSummary() return summary end
+function DefylerUIInventoryValue.FormatMoney(value) return money(value) end
+function DefylerUIInventoryValue.RegisterRefresh(callback)
+    if type(callback)=="function" then listeners[#listeners+1]=callback end
 end
-local function layoutFooter()
-    local bag=ContainerFrameCombinedBags
-    -- MoneyFrame spans the full row; the native coin controls occupy its right side.
-    footer:ClearAllPoints()
-    footer:SetPoint("LEFT",bag.MoneyFrame,"LEFT",6,0)
-    footer:SetWidth(math.max(1,bag.MoneyFrame:GetWidth()-186))
-    footer:SetFrameLevel(bag.MoneyFrame:GetFrameLevel()+2)
-end
+
 local function refresh()
     queued=false
-    if not footer or not footer:IsShown() then return end
-    layoutFooter()
     summary=estimate()
-    local incomplete=summary.missing+summary.pending+summary.fallback>0
-    label:SetText("Estimated inventory value: |cffffffff"..money(summary.total)..(incomplete and " *" or "").."|r")
-    if footer:IsMouseOver() then tooltip() end
+    for _,callback in ipairs(listeners) do pcall(callback,summary) end
 end
 local function schedule()
-    if queued or not footer or not footer:IsShown() then return end
+    if queued then return end
     queued=true
     C_Timer.After(.2,refresh)
 end
@@ -100,26 +82,9 @@ local function registerPriceRefresh()
     DXMPriceSummary.RegisterRefresh(schedule)
     priceRefreshRegistered=true
 end
-local function attach()
-    registerPriceRefresh()
-    if footer or (InCombatLockdown and InCombatLockdown()) then return end
-    local bag=ContainerFrameCombinedBags
-    if not bag or not bag.MoneyFrame then return end
-    footer=CreateFrame("Frame",nil,bag)
-    footer:SetHeight(18)
-    layoutFooter()
-    footer:EnableMouse(true)
-    label=footer:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
-    label:SetAllPoints();label:SetJustifyH("LEFT");label:SetWordWrap(false)
-    footer:SetScript("OnEnter",tooltip)
-    footer:SetScript("OnLeave",function() GameTooltip:Hide() end)
-    footer:SetScript("OnShow",function() layoutFooter();schedule() end)
-    bag.MoneyFrame:HookScript("OnSizeChanged",function() layoutFooter() end)
-    schedule()
-end
 local events=CreateFrame("Frame")
-for _,event in ipairs({"PLAYER_LOGIN","ADDON_LOADED","PLAYER_REGEN_ENABLED","BAG_UPDATE_DELAYED","GET_ITEM_INFO_RECEIVED"}) do events:RegisterEvent(event) end
+for _,event in ipairs({"PLAYER_LOGIN","ADDON_LOADED","BAG_UPDATE_DELAYED","GET_ITEM_INFO_RECEIVED"}) do events:RegisterEvent(event) end
 events:SetScript("OnEvent",function(_,event)
-    attach()
-    if event~="GET_ITEM_INFO_RECEIVED" or (summary and summary.pending>0) then schedule() end
+    registerPriceRefresh()
+    if event~="GET_ITEM_INFO_RECEIVED" or summary.pending>0 then schedule() end
 end)

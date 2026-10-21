@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.0.0
+
+The first full Defylers Addon Pack release for WoW Forever combines DXM Exchange, DQA, DDQ, Defyler UI, Defyler Damage Meter, Forever Settings, Forever Core Fixes, and Nemesis.
+
+DXM now includes expanded Auction House scanning, valuation, crafting, salvage, vendor, earnings, and ledger workflows. Neutral Auction House scans are isolated from faction market history and are never uploaded; Salvage continues to value enchanting materials from the character's faction market.
+
+DQA adds automatic quest-objective highlights, character-only critical-strike rewards, persistent creature kill counts, Mage book tracking with configurable per-book map markers, world-map pins, bank detection, and proximity-scaled book icons.
+
+This release also includes broad reliability and interface fixes across the suite, including protected-action handling, window layering, saved layouts, and client-compatible graphics controls.
+
 ## v1.1.3
 
 This hotfix refreshes the CurseForge package with Nemesis 0.3.28. Nemesis now avoids restricted nameplate GUID comparisons under the Midnight secret-value system.

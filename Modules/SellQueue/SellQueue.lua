@@ -1,7 +1,7 @@
 if not DXMCore or not DXMExchange then return end
 
 local Module = DXMCore:Module("SellQueue", "Scanner")
-DXMConfig = DXMConfig or {}
+DXMConfig = type(DXMConfig) == "table" and DXMConfig or {}
 if DXMConfig.sellPriceMode ~= "market7" and DXMConfig.sellPriceMode ~= "market24"
     and DXMConfig.sellPriceMode ~= "undercut" then
     DXMConfig.sellPriceMode = "market7"
@@ -26,6 +26,17 @@ local previewRows = {}
 local listButton
 local skipButton
 local cancelButton
+local alwaysIgnoreButton
+
+local function ignoreTable()
+    if type(DXMConfig) ~= "table" then DXMConfig = {} end
+    if type(DXMConfig.sellAlwaysIgnore) ~= "table" then DXMConfig.sellAlwaysIgnore = {} end
+    return DXMConfig.sellAlwaysIgnore
+end
+
+local function isAlwaysIgnored(itemID)
+    return ignoreTable()[tostring(tonumber(itemID) or itemID)] == true
+end
 
 local MODE_LABELS = {
     market7 = "7 Day Market",
@@ -95,6 +106,7 @@ local function updateActions()
     local ready = entry and currentPrice and currentPrice > 0 and not pendingQuery and not awaitingPost
     listButton:SetEnabled(ready == true)
     skipButton:SetEnabled(entry ~= nil and not awaitingPost)
+    alwaysIgnoreButton:SetEnabled(entry ~= nil and not awaitingPost)
     cancelButton:SetEnabled(true)
 end
 
@@ -220,6 +232,7 @@ end
 
 local function addBagEntry(entries, commodities, bag, slot, info)
     if not info or not info.itemID or info.isLocked then return end
+    if isAlwaysIgnored(info.itemID) then return end
     local location = ItemLocation:CreateFromBagAndSlot(bag, slot)
     local ok, valid = pcall(C_AuctionHouse.IsSellItemValid, location, false)
     if not ok or valid ~= true then return end
@@ -329,6 +342,23 @@ local function skipCurrent()
     prepareCurrent()
 end
 
+local function alwaysIgnoreCurrent()
+    local entry = queue[queueIndex]
+    if not entry or awaitingPost then return end
+    ignoreTable()[tostring(entry.itemID)] = true
+    local ignoredName = entry.name or ("Item " .. entry.itemID)
+    queryGeneration = queryGeneration + 1
+    pendingQuery = nil
+    for index = #queue, 1, -1 do
+        if queue[index].itemID == entry.itemID then
+            table.remove(queue, index)
+            if index < queueIndex then queueIndex = queueIndex - 1 end
+        end
+    end
+    setStatus(ignoredName .. " will always be skipped.")
+    prepareCurrent()
+end
+
 local function cancelQueue()
     queryGeneration = queryGeneration + 1
     pendingQuery, awaitingPost = nil, nil
@@ -431,11 +461,13 @@ local function buildPage(parent)
     actions:SetPoint("TOPLEFT", card, "BOTTOMLEFT", 0, -10)
     actions:SetPoint("RIGHT", page, "RIGHT", -18, 0)
     actions:SetHeight(28)
-    listButton = DXMTheme:CreateButton(actions); listButton:SetSize(110, 26); listButton:SetPoint("LEFT"); listButton:SetText("List")
-    skipButton = DXMTheme:CreateButton(actions); skipButton:SetSize(110, 26); skipButton:SetPoint("LEFT", listButton, "RIGHT", 8, 0); skipButton:SetText("Skip")
-    cancelButton = DXMTheme:CreateButton(actions); cancelButton:SetSize(110, 26); cancelButton:SetPoint("LEFT", skipButton, "RIGHT", 8, 0); cancelButton:SetText("Cancel")
+    listButton = DXMTheme:CreateButton(actions); listButton:SetSize(96, 26); listButton:SetPoint("LEFT"); listButton:SetText("List")
+    skipButton = DXMTheme:CreateButton(actions); skipButton:SetSize(96, 26); skipButton:SetPoint("LEFT", listButton, "RIGHT", 7, 0); skipButton:SetText("Skip")
+    alwaysIgnoreButton = DXMTheme:CreateButton(actions); alwaysIgnoreButton:SetSize(126, 26); alwaysIgnoreButton:SetPoint("LEFT", skipButton, "RIGHT", 7, 0); alwaysIgnoreButton:SetText("Always Ignore")
+    cancelButton = DXMTheme:CreateButton(actions); cancelButton:SetSize(96, 26); cancelButton:SetPoint("LEFT", alwaysIgnoreButton, "RIGHT", 7, 0); cancelButton:SetText("Cancel")
     listButton:SetScript("OnClick", postCurrent)
     skipButton:SetScript("OnClick", skipCurrent)
+    alwaysIgnoreButton:SetScript("OnClick", alwaysIgnoreCurrent)
     cancelButton:SetScript("OnClick", cancelQueue)
 
     local preview = DXMTheme:CreatePanel(page)

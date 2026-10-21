@@ -7,6 +7,18 @@ DXMStatsOverTimeData = DXMStatsOverTimeData or {}
 DXMPriceHistoryData = DXMPriceHistoryData or {}
 DXMPriceHistoryMeta = DXMPriceHistoryMeta or {}
 
+local function isNeutralMarketKey(key)
+    return type(key) == "string" and key:match("::neutral$") ~= nil
+end
+
+-- Neutral Auction House listings are too volatile to retain as market
+-- history. Remove older neutral partitions created by previous versions.
+for _, store in ipairs({DXMStatsOverTimeData, DXMPriceHistoryData, DXMPriceHistoryMeta}) do
+    for key in pairs(store) do
+        if isNeutralMarketKey(key) then store[key] = nil end
+    end
+end
+
 local function settings()
     local config = DXMConfig or {}
     local days = math.max(1, math.min(365, tonumber(config.historyRetentionDays) or 30))
@@ -34,6 +46,8 @@ end
 
 -- Preserve the compact hourly table for compatibility and as a fallback.
 function Module:ScannerItemsPush(items)
+    local identity = DXMCore:MarketIdentity()
+    if identity and identity.market == "neutral" then return end
     local auctionKey = DXMCore:AuctionKey()
     local data = DXMStatsOverTimeData[auctionKey]
     if not data then data = {}; DXMStatsOverTimeData[auctionKey] = data end
@@ -56,6 +70,8 @@ end
 -- Keep one observation per item per hour. Repeated scans in the same hour
 -- update that point in place instead of growing and repruning every item list.
 function Module:ScannerItemsCompleted(items)
+    local identity = DXMCore:MarketIdentity()
+    if identity and identity.market == "neutral" then return end
     local enabled, days, maximum = settings()
     if not enabled then return end
     local auctionKey = DXMCore:AuctionKey()

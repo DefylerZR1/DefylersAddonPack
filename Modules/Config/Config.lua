@@ -1,6 +1,12 @@
 if not DXMCore or not DXMExchange then return end
 
-DXMConfig = DXMConfig or {}
+DXMConfig = type(DXMConfig) == "table" and DXMConfig or {}
+
+local function ignoreTable()
+    if type(DXMConfig) ~= "table" then DXMConfig = {} end
+    if type(DXMConfig.sellAlwaysIgnore) ~= "table" then DXMConfig.sellAlwaysIgnore = {} end
+    return DXMConfig.sellAlwaysIgnore
+end
 if DXMConfig.historyEnabled == nil then DXMConfig.historyEnabled = true end
 if DXMConfig.historyRetentionDays == nil then DXMConfig.historyRetentionDays = 30 end
 if DXMConfig.historyMaxSamples == nil then DXMConfig.historyMaxSamples = 40 end
@@ -52,6 +58,14 @@ local function historyCounts()
         for _, list in pairs(realm) do items = items + 1; samples = samples + #list end
     end
     return realms, items, samples
+end
+
+local function ignoredSellCount()
+    local count = 0
+    for _, ignored in pairs(ignoreTable()) do
+        if ignored == true then count = count + 1 end
+    end
+    return count
 end
 
 local function buildPage(page)
@@ -118,6 +132,13 @@ local function buildPage(page)
     local tooltipBox = checkbox(left, interfaceTitle, -5, "Show DXM values in item tooltips",
         function() return DXMConfig.showTooltips ~= false end,
         function(value) DXMConfig.showTooltips = value end)
+    local clearIgnores = DXMTheme:CreateButton(left)
+    clearIgnores:SetSize(150, 23)
+    clearIgnores:SetPoint("TOPLEFT", tooltipBox, "BOTTOMLEFT", 0, -9)
+    clearIgnores:SetScript("OnClick", function(self)
+        wipe(ignoreTable())
+        self:SetText("Clear sell ignores (0)")
+    end)
 
     local right = CreateFrame("Frame", nil, page)
     right:SetPoint("TOPLEFT", left, "TOPRIGHT", 20, 0)
@@ -145,6 +166,7 @@ local function buildPage(page)
 
     page:SetScript("OnShow", function()
         poorBox:Refresh(); commonBox:Refresh(); historyBox:Refresh(); tooltipBox:Refresh(); networkBox:Refresh()
+        clearIgnores:SetText(("Clear sell ignores (%d)"):format(ignoredSellCount()))
         retention:SetNumber(tonumber(DXMConfig.historyRetentionDays) or 30)
         samples:SetNumber(tonumber(DXMConfig.historyMaxSamples) or 40)
         local partitions, items, observations = historyCounts()

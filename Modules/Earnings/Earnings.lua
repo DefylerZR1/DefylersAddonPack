@@ -34,7 +34,7 @@ local function buildLedgerSnapshot(nowValue)
     nowValue = tonumber(nowValue) or GetServerTime()
     local snapshot = {
         daily = {}, items = {}, auctionEarned = 0, auctionSpent = 0,
-        tradeEarned = 0, tradeSpent = 0,
+        vendorEarned = 0, tradeEarned = 0, tradeSpent = 0,
     }
     local cutoff = nowValue - (DAYS_SHOWN - 1) * 86400
     local function dailyEntry(timestamp)
@@ -44,7 +44,7 @@ local function buildLedgerSnapshot(nowValue)
         local day = snapshot.daily[key]
         if not day then
             day = {income = 0, spending = 0, auctionIncome = 0, auctionSpending = 0,
-                tradeIncome = 0, tradeSpending = 0, proceeds = 0, sales = 0, items = 0}
+                vendorIncome = 0, tradeIncome = 0, tradeSpending = 0, proceeds = 0, sales = 0, items = 0}
             snapshot.daily[key] = day
         end
         return day
@@ -65,6 +65,34 @@ local function buildLedgerSnapshot(nowValue)
         elseif row.kind == "trade" and row.status == "spent" then
             snapshot.tradeSpent = snapshot.tradeSpent + total
             if day then day.tradeSpending = day.tradeSpending + total; day.spending = day.spending + total end
+        elseif row.kind == "vendor" and row.status == "sold" and row.collected then
+            snapshot.vendorEarned = snapshot.vendorEarned + total
+            if day then
+                local quantity = math.max(1, math.floor(tonumber(row.quantity) or 1))
+                local proceeds = saleProceeds(row)
+                day.vendorIncome = day.vendorIncome + total
+                day.income = day.income + total
+                day.proceeds = day.proceeds + proceeds
+                day.sales = day.sales + 1
+                day.items = day.items + quantity
+                local itemID = tonumber(row.itemID)
+                if itemID then
+                    local item = snapshot.items[itemID] or {
+                        itemID = itemID, name = row.name, quantity = 0, proceeds = 0,
+                        sales = 0, knownCost = 0, knownProfit = 0, knownQuantity = 0,
+                    }
+                    item.name = row.name or item.name
+                    item.quantity = item.quantity + quantity
+                    item.proceeds = item.proceeds + proceeds
+                    item.sales = item.sales + 1
+                    if row.profit ~= nil and row.costBasis ~= nil then
+                        item.knownCost = item.knownCost + math.max(0, tonumber(row.costBasis) or 0)
+                        item.knownProfit = item.knownProfit + (tonumber(row.profit) or 0)
+                        item.knownQuantity = item.knownQuantity + quantity
+                    end
+                    snapshot.items[itemID] = item
+                end
+            end
         elseif row.kind == "mail" and row.status == "sold" and row.collected then
             snapshot.auctionEarned = snapshot.auctionEarned + total
             if day then
@@ -204,6 +232,7 @@ local function buildPage(page)
             GameTooltip:AddDoubleLine("Net", (net >= 0 and "+" or "") .. money(net), 1, 1, 1, net >= 0 and 0.2 or 1, net >= 0 and 1 or 0.25, net >= 0 and 0.2 or 0.25)
             GameTooltip:AddDoubleLine("Auction income", money(self.entry.auctionIncome), 1, 1, 1, 1, 1, 1)
             GameTooltip:AddDoubleLine("Auction spending", money(self.entry.auctionSpending), 1, 1, 1, 1, 1, 1)
+            GameTooltip:AddDoubleLine("Merchant income", money(self.entry.vendorIncome), 1, 1, 1, 1, 1, 1)
             GameTooltip:AddDoubleLine("Sales", tostring(self.entry.sales or 0), 1, 1, 1, 1, 1, 1)
             GameTooltip:AddDoubleLine("Items sold", tostring(self.entry.items or 0), 1, 1, 1, 1, 1, 1)
             GameTooltip:Show()
@@ -279,10 +308,11 @@ local function buildPage(page)
         total:SetText(("Last 14 days: Net %s%s|r    Income |cff33ff33%s|r / Spending |cffff5555%s|r    %d sales (%d items)"):format(periodNet >= 0 and "|cff33ff33+" or "|cffff5555", money(periodNet), money(totalIncome), money(totalSpending), totalSales, totalItems))
         local earned = tonumber(data.auctionEarned) or 0
         local auctionSpent = tonumber(data.auctionSpent) or 0
+        local vendorEarned = tonumber(data.vendorEarned) or 0
         local tradeEarned = tonumber(data.tradeEarned) or 0
         local tradeSpent = tonumber(data.tradeSpent) or 0
-        local net = earned + tradeEarned - auctionSpent - tradeSpent
-        cashFlow:SetText(("All recorded: Auctions |cff33ff33+%s|r / |cffff5555-%s|r    Player trades |cff33ff33+%s|r / |cffff5555-%s|r    Net %s%s|r"):format(money(earned), money(auctionSpent), money(tradeEarned), money(tradeSpent), net >= 0 and "|cff33ff33+" or "|cffff5555", money(net)))
+        local net = earned + vendorEarned + tradeEarned - auctionSpent - tradeSpent
+        cashFlow:SetText(("All recorded: Auctions |cff33ff33+%s|r / |cffff5555-%s|r    Merchants |cff33ff33+%s|r    Player trades |cff33ff33+%s|r / |cffff5555-%s|r    Net %s%s|r"):format(money(earned), money(auctionSpent), money(vendorEarned), money(tradeEarned), money(tradeSpent), net >= 0 and "|cff33ff33+" or "|cffff5555", money(net)))
         for index, value in ipairs(entries) do
             local display = bars[index]
             local income = tonumber(value.entry.income) or 0

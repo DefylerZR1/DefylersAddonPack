@@ -8,6 +8,9 @@ local DISENCHANT_SPELL_ID = 13262
 local target
 local completed
 local lootCapturePending = false
+local pendingOutputs
+local pendingOutputsAt
+local record
 
 local function now() return GetServerTime and GetServerTime() or time() end
 local function itemID(link)
@@ -30,6 +33,19 @@ end
 local function remember(link)
     if not link then return end
     target={link=link,itemID=itemID(link),targetedAt=GetTime()}
+    -- LOOT_OPENED can precede the secure button's PostClick callback. Its
+    -- slots may already be gone one frame later when auto-loot is enabled, so
+    -- retain the synchronous snapshot and join it to the source here.
+    if pendingOutputs and GetTime()-(pendingOutputsAt or 0)<2 then
+        completed=target
+        completed.completedAt=GetTime()
+        target=nil
+        local outputs=pendingOutputs
+        pendingOutputs=nil
+        pendingOutputsAt=nil
+        record(outputs)
+        completed=nil
+    end
 end
 local function promotePreparedTargetAtLoot()
     if completed then return true end
@@ -45,7 +61,7 @@ local function promotePreparedTargetAtLoot()
     end
     return false
 end
-local function record(outputs)
+record = function(outputs)
     if not completed or not completed.itemID or not next(outputs) then return end
     local data=marketData()
     local key=tostring(completed.itemID)
@@ -75,10 +91,7 @@ local function record(outputs)
     end
 end
 
-local function captureDisenchantLoot()
-    lootCapturePending=false
-    promotePreparedTargetAtLoot()
-    if not completed or GetTime()-(completed.completedAt or 0)>10 then return end
+local function readDisenchantLoot()
     local outputs={}
     for slot=1,(GetNumLootItems and GetNumLootItems() or 0) do
         if not GetLootSlotType or GetLootSlotType(slot)==LOOT_SLOT_ITEM then
@@ -90,10 +103,25 @@ local function captureDisenchantLoot()
             end
         end
     end
-    record(outputs)
-    completed=nil
+    return next(outputs) and outputs or nil
 end
 
+local function captureDisenchantLoot()
+    lootCapturePending=false
+    local outputs=readDisenchantLoot()
+    if outputs then
+        pendingOutputs=outputs
+        pendingOutputsAt=GetTime()
+    else
+        outputs=pendingOutputs
+    end
+    promotePreparedTargetAtLoot()
+    if not completed or GetTime()-(completed.completedAt or 0)>10 or not outputs then return end
+    record(outputs)
+    completed=nil
+    pendingOutputs=nil
+    pendingOutputsAt=nil
+end
 local events=CreateFrame("Frame")
 for _,event in ipairs({"UNIT_SPELLCAST_SUCCEEDED","UNIT_SPELLCAST_FAILED","UNIT_SPELLCAST_INTERRUPTED","LOOT_OPENED","LOOT_CLOSED"}) do events:RegisterEvent(event) end
 events:SetScript("OnEvent",function(_,event,...)
@@ -109,15 +137,12 @@ events:SetScript("OnEvent",function(_,event,...)
         local unit,castGUID,spellID=...
         if unit=="player" and tonumber(spellID)==DISENCHANT_SPELL_ID then target=nil;completed=nil end
     elseif event=="LOOT_OPENED" then
-        -- The client can open disenchant loot before DDQ's protected button
-        -- reaches its safe PostClick handler. Defer one frame so PostClick can
-        -- supply the exact source item, then read the loot before DDQ collects it.
-        if lootCapturePending then return end
-        lootCapturePending=true
-        if C_Timer and C_Timer.After then
+        -- Snapshot synchronously: automatic looting can empty every slot before
+        -- the next frame. remember() completes the join if PostClick runs later.
+        captureDisenchantLoot()
+        if pendingOutputs and not lootCapturePending and C_Timer and C_Timer.After then
+            lootCapturePending=true
             C_Timer.After(0,captureDisenchantLoot)
-        else
-            captureDisenchantLoot()
         end
     elseif event=="LOOT_CLOSED" then
         if completed and GetTime()-(completed.completedAt or 0)>10 then completed=nil end

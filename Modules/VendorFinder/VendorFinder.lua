@@ -104,12 +104,38 @@ local function showTooltip(row)
     GameTooltip:Show()
 end
 
+local purchaseError
+local openResultGeneration = 0
 local function openResult(result)
     if not result or not AuctionHouseFrame or not result.browseResult then return end
-    AuctionHouseFrame:SelectBrowseResult(result.browseResult)
+    openResultGeneration = openResultGeneration + 1
+    local generation = openResultGeneration
+    local attempts = 0
+    local function selectWhenReady()
+        if generation ~= openResultGeneration or not AuctionHouseFrame or not AuctionHouseFrame:IsShown() then return end
+        local itemKey = result.browseResult.itemKey or result.itemKey
+        local itemKeyInfo = itemKey and C_AuctionHouse.GetItemKeyInfo(itemKey)
+        if itemKeyInfo then
+            local ok = pcall(AuctionHouseFrame.SelectBrowseResult, AuctionHouseFrame, result.browseResult)
+            if ok then return end
+        end
+        attempts = attempts + 1
+        if attempts == 1 then
+            local itemID = itemKey and itemKey.itemID
+            if itemID and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(itemID) end
+            setStatus("Loading item details...")
+        end
+        if attempts < 20 then
+            C_Timer.After(0.10, selectWhenReady)
+        else
+            purchaseError("DXM: item details did not load. Click the result again.")
+            setStatus("Item details timed out; click the row to retry.")
+        end
+    end
+    selectWhenReady()
 end
 
-local function purchaseError(message)
+purchaseError = function(message)
     if UIErrorsFrame and UIErrorsFrame.AddMessage then
         UIErrorsFrame:AddMessage(message, 1, 0.2, 0.2)
     else
@@ -306,8 +332,16 @@ local function finishCommodityPurchase(result)
         skipQueuedPurchase("Skipped an item that is no longer profitable.")
         return true
     end
+    local request = pendingPurchase
     pendingPurchase = nil
-    setStatus("Live quote loaded. Confirm the one-item purchase in Blizzard's dialog.")
+    activePurchase = {
+        result = result,
+        itemID = itemID,
+        isCommodity = true,
+        fromQueue = request and request.fromQueue == true,
+    }
+    setStatus(purchaseQueue and ("Queue %d/%d: confirm this one-unit commodity purchase. Cancel stops the queue."):format(purchaseQueueIndex,#purchaseQueue)
+        or "Live quote loaded. Confirm the one-unit purchase in Blizzard's dialog.")
     armCursorBuyDialog()
     AuctionHouseFrame:StartCommoditiesPurchase(itemID, 1, unitPrice, unitPrice)
     return true
@@ -362,9 +396,38 @@ purchaseEvents:RegisterEvent("COMMODITY_SEARCH_RESULTS_RECEIVED")
 purchaseEvents:RegisterEvent("ITEM_SEARCH_RESULTS_UPDATED")
 purchaseEvents:RegisterEvent("AUCTION_HOUSE_SHOW_ERROR")
 purchaseEvents:RegisterEvent("AUCTION_HOUSE_CLOSED")
+purchaseEvents:RegisterEvent("COMMODITY_PRICE_UNAVAILABLE")
+purchaseEvents:RegisterEvent("COMMODITY_PURCHASE_FAILED")
+purchaseEvents:RegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
 purchaseEvents:SetScript("OnEvent", function(_, event, ...)
     if event == "AUCTION_HOUSE_CLOSED" then
         if purchaseQueue then stopPurchaseQueue("Purchase queue stopped because the Auction House closed.") end
+        return
+    end
+    if event == "COMMODITY_PURCHASE_SUCCEEDED" then
+        local completed = activePurchase
+        if not completed or not completed.isCommodity then return end
+        activePurchase = nil
+        if purchaseQueue and completed.fromQueue then
+            purchaseQueueIndex = purchaseQueueIndex + 1
+            setStatus(("Commodity purchased. Loading queue %d/%d..."):format(math.min(purchaseQueueIndex,#purchaseQueue),#purchaseQueue))
+            C_Timer.After(.15, advancePurchaseQueue)
+        else
+            setStatus("Commodity purchase complete.")
+        end
+        return
+    end
+    if event == "COMMODITY_PRICE_UNAVAILABLE" or event == "COMMODITY_PURCHASE_FAILED" then
+        local failed = activePurchase
+        if not failed or not failed.isCommodity then return end
+        activePurchase = nil
+        if AuctionHouseFrame and AuctionHouseFrame.BuyDialog then AuctionHouseFrame.BuyDialog:Hide() end
+        if purchaseQueue and failed.fromQueue then
+            skipQueuedPurchase("Commodity quote failed; skipped it and advanced the queue.")
+        else
+            purchaseError("DXM: Blizzard could not complete that commodity quote.")
+            setStatus("Commodity quote failed. Right-click the row to retry.")
+        end
         return
     end
     if event == "AUCTION_HOUSE_SHOW_ERROR" then
@@ -373,6 +436,16 @@ purchaseEvents:SetScript("OnEvent", function(_, event, ...)
         local itemNotAvailable = Enum and Enum.AuctionHouseError and Enum.AuctionHouseError.ItemNotAvailable or 25
         local failed = activePurchase
         activePurchase = nil
+        if failed and failed.isCommodity then
+            if AuctionHouseFrame and AuctionHouseFrame.BuyDialog then AuctionHouseFrame.BuyDialog:Hide() end
+            if failed.fromQueue then
+                skipQueuedPurchase("Commodity purchase error; skipped it and advanced the queue.")
+            else
+                purchaseError("DXM: Blizzard rejected that commodity purchase.")
+                setStatus("Commodity purchase failed. Right-click the row to retry.")
+            end
+            return
+        end
         if failed and (errorCode == itemNotFound or errorCode == itemNotAvailable) then
             unavailableAuctions[failed.auctionID] = true
             if (failed.retryCount or 0) >= 9 then
@@ -473,8 +546,12 @@ local function buyResult(result, fromQueue)
     GameTooltip:Hide()
     pendingPurchase = {result = result, isCommodity = itemKeyInfo.isCommodity, fromQueue = fromQueue == true}
     if itemKeyInfo.isCommodity then
-        if finishCommodityPurchase(result) then return end
-        setStatus("Loading the current commodity price...")
+        -- A browse scan or an earlier quantity lookup can leave a cached
+        -- commodity row behind. It is not a valid purchase quote on Forever's
+        -- Auction House and often produces a permanently disabled Buy Now
+        -- button. Always request a fresh item-specific commodity result before
+        -- asking Blizzard to create the confirmation quote.
+        setStatus("Refreshing the commodity quote...")
         AuctionHouseFrame:QueryItem(AuctionHouseSearchContext.BuyCommodities, result.itemKey)
     else
         if finishItemPurchase(result) then return end
